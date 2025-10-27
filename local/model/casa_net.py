@@ -90,7 +90,8 @@ class CASA_Module(nn.Module):
         self.dim_audio = dim_audio
         self.dim_video = dim_video
         self.dim_spk = dim_spk
-        self.dim_audio_combined = dim_audio + dim_spk
+        # self.dim_audio_combined = dim_audio + dim_spk // For later when considering speaker embeddings
+        self.dim_audio_combined = dim_audio
         
         self.cross_attn_a2v = MultiHeadCrossAttention(
             dim_q=dim_video,
@@ -122,7 +123,8 @@ class CASA_Module(nn.Module):
         B, T, D_A, N = audio_features.shape
         _, _, D_V, _ = video_features.shape
         
-        F_a = torch.cat([audio_features, speaker_embeddings], dim=2)
+        # F_a = torch.cat([audio_features, speaker_embeddings], dim=2) // Consider Later with speaker embeddings
+        F_a = audio_features
         
         F_a_reshaped = F_a.permute(0, 3, 1, 2).reshape(B*N, T, self.dim_audio_combined)
         F_v_reshaped = video_features.permute(0, 3, 1, 2).reshape(B*N, T, D_V)
@@ -192,7 +194,8 @@ class CASA_Net_AVSD(nn.Module):
                  num_heads=4, hidden_dim=256, dropout=0.1):
         super(CASA_Net_AVSD, self).__init__()
         
-        fused_dim = dim_audio + dim_video + dim_spk
+        # fused_dim = dim_audio + dim_video + dim_spk // For Later
+        fused_dim = dim_audio + dim_video
         
         self.casa_module = CASA_Module(
             dim_audio=dim_audio,

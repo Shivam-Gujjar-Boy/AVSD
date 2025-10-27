@@ -12,8 +12,8 @@ import random
 import tqdm
 sys.path.append("..")
 import utils
-from model.avsd_net import AIVECTOR_ConformerVEmbedding_SD
-from reader.reader_avsd import Label_Generate_From_RTTM, collate_fn, Audio_AEmbedding_VEmbedding_Worse_Data_Reader
+from model.avsd_net import AIVECTOR_ConformerVEmbedding_SD_JOINT
+from reader.csv_data_reader import CSVAudioVideoDataReader, csv_collate_fn
 import config
 from loss_function import SoftCrossEntropy_SingleTargets
 
@@ -31,7 +31,7 @@ def main(args):
     #seed_torch(args.seed)
 
     # define the model
-    nnet = AIVECTOR_ConformerVEmbedding_SD(config.configs_SC_Multiple_6Speakers_AEmbedding_VEmbedding_2Classes)
+    nnet = AIVECTOR_ConformerVEmbedding_SD_JOINT(config.configs_SC_Multiple_6Speakers_AEmbedding_VEmbedding_2Classes)
     #nnet = nnet.cuda()
 
     # training setups
@@ -45,21 +45,27 @@ def main(args):
         nnet.load_state_dict(state_dict)
     
     nnet = torch.nn.DataParallel(nnet, device_ids = [0, 1, 2, 3]).cuda()
-    #softmax = torch.nn.Softmax(dim=2)
-    label_2classes_train = Label_Generate_From_RTTM(args.rttm_train_path)
+    
     for iter_ in range(args.start_iter, args.end_iter):
         start_time = time.time()
         running_loss = 0.0
         nnet.train()
-        dataset_train = Audio_AEmbedding_VEmbedding_Worse_Data_Reader(args.train_audio_fea_dir, args.train_speaker_embedding, args.train_video_fea_scp, label_2classes_train, set_video_silence=0.15, set_video_speak=0.20, min_speaker=2, max_speaker=6, max_utt_durance=800, frame_shift=600, audio_type=args.audio_type.split("+"))
-        dataloader_train = torch.utils.data.DataLoader(dataset_train, 
-                                batch_size=args.minibatchsize_train, 
-                                collate_fn=collate_fn, 
-                                shuffle=True, drop_last=True, 
-                                num_workers=args.train_num_workers)
+        
+        # NEW: Use CSV data reader
+        dataset_train = CSVAudioVideoDataReader(args.csv_path, max_speakers=6)
+        dataloader_train = torch.utils.data.DataLoader(
+            dataset_train, 
+            batch_size=args.minibatchsize_train, 
+            collate_fn=csv_collate_fn,  # NEW: Use CSV collate function
+            shuffle=True, 
+            drop_last=True, 
+            num_workers=args.train_num_workers
+        )
+        
         all_file = len(dataloader_train)
         checkpoint_save_model = int(all_file // 6)
         batch_id = 0
+        
         for audio_fea, audio_embedding, video_embedding, mask_label, nframe in tqdm.tqdm(dataloader_train):
             audio_fea = audio_fea.cuda()
             audio_embedding = audio_embedding.cuda()
@@ -98,7 +104,7 @@ def seed_torch(seed=42):
     torch.backends.cudnn.enabled = True
 
 if __name__=="__main__":
-    # Arguement Parser
+    # Argument Parser - UPDATED
     parser = argparse.ArgumentParser()
     parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
     parser.add_argument("--minibatchsize_train", default=48, type=int)
@@ -109,13 +115,9 @@ if __name__=="__main__":
     parser.add_argument("--start_iter", default=0, type=int)
     parser.add_argument("--end_iter", default=20, type=int)
     parser.add_argument("--train_num_workers", default=16, type=int, help="number of training workers")
-    parser.add_argument("--train_audio_fea_dir", default='train_audio_fea_dir', type=str)
-    parser.add_argument("--train_speaker_embedding", default='train_speaker_embedding', type=str)
-    parser.add_argument("--train_video_fea_scp", default='train_video_fea_scp', type=str)
-    parser.add_argument("--rttm_train_path", default='rttm_train_path', type=str)
-    parser.add_argument("--audio_type", default='audio_type', type=str)
+    parser.add_argument("--csv_path", default='training_chunks.csv', type=str, help="path to training chunks CSV file")  # NEW
+    
     args = parser.parse_args()
 
-    # torch.backends.cudnn.enabled=False
     # run main
     main(args)

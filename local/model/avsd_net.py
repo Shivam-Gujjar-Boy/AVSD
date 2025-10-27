@@ -89,7 +89,8 @@ class AIVECTOR_CASA_SD(nn.Module):
         self.casa_net = CASA_Net_AVSD(
             dim_audio=self.audio_dim,
             dim_video=self.video_dim, 
-            dim_spk=self.speaker_embedding_size,
+            # dim_spk=self.speaker_embedding_size, // For later when considering speaker embeddings
+            dim_spk=0,
             num_speakers=self.output_speaker,
             num_heads=configs.get("num_attention_heads", 4),
             hidden_dim=configs.get("decoder_hidden_dim", 256),
@@ -112,7 +113,10 @@ class AIVECTOR_CASA_SD(nn.Module):
         
         video_features = video_embedding.permute(0, 2, 3, 1)
         
-        speaker_embeddings = audio_embedding.unsqueeze(1).expand(-1, Time, -1, -1)
+        # speaker_embeddings = audio_embedding.unsqueeze(1).expand(-1, Time, -1, -1)
+        # speaker_embeddings = speaker_embeddings.permute(0, 1, 3, 2)
+
+        speaker_embeddings = torch.zeros_like(audio_embedding.unsqueeze(1).expand(-1, Time, -1, -1))
         speaker_embeddings = speaker_embeddings.permute(0, 1, 3, 2)
         
         outputs = self.casa_net(audio_features, video_features, speaker_embeddings, nframes)
