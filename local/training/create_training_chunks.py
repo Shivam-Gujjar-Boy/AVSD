@@ -1,176 +1,180 @@
-# create_training_chunks.py
 import pandas as pd
 import numpy as np
+from pathlib import Path
 import os
-import glob
+from typing import List, Dict
 
-def create_training_chunks(session_dirs, chunk_duration=8.0, frame_rate=25.0, overlap=0.5):
-    """
-    Create training chunks CSV from your dataset structure
-    
-    Args:
-        session_dirs: List of paths to session directories
-        chunk_duration: Duration of each chunk in seconds (default: 8.0)
-        frame_rate: Video frame rate (default: 25.0 fps)
-        overlap: Overlap between consecutive chunks (0.0 to 1.0, default: 0.5)
-    
-    Returns:
-        pandas.DataFrame: DataFrame containing all training chunks
-    """
-    chunks = []
-    
-    for session_dir in session_dirs:
-        print(f"Processing {session_dir}...")
+class TrainingCSVCreator:
+    def __init__(self, dataset_dir: str, output_csv: str, chunk_duration: float = 8.0, stride: float = 4.0, fps: int = 25):
+        self.dataset_dir = Path(dataset_dir)
+        self.output_csv = output_csv
+        self.chunk_duration = chunk_duration
+        self.stride = stride
+        self.fps = fps
         
-        # Check if session directory exists
-        if not os.path.isdir(session_dir):
-            print(f"Warning: {session_dir} not found, skipping...")
-            continue
-            
-        # Calculate total duration from audio features
-        audio_path = os.path.join(session_dir, 'audio_features.npy')
-        if not os.path.exists(audio_path):
-            print(f"Warning: {audio_path} not found, skipping session...")
-            continue
-            
+        self.chunk_frames = int(chunk_duration * fps)
+        self.stride_frames = int(stride * fps)
+        
+    def find_max_speakers(self) -> int:
+        """Find maximum number of speakers across all sessions"""
+        max_speakers = 0
+        for session_dir in self.dataset_dir.iterdir():
+            if session_dir.is_dir():
+                video_features_dir = session_dir / "video_features"
+                if video_features_dir.exists():
+                    speaker_files = list(video_features_dir.glob("spk_*.npy"))
+                    max_speakers = max(max_speakers, len(speaker_files))
+        print(f"Maximum speakers found: {max_speakers}")
+        return max_speakers
+    
+    def get_session_speakers(self, session_dir: Path) -> List[str]:
+        """Get list of speaker IDs for a session"""
+        video_features_dir = session_dir / "video_features"
+        if not video_features_dir.exists():
+            return []
+        
+        speaker_files = list(video_features_dir.glob("spk_*.npy"))
+        speaker_ids = [f.stem for f in speaker_files]  # Get filenames without extension
+        return sorted(speaker_ids)
+    
+    def create_chunks_for_session(self, session_dir: Path, max_speakers: int) -> List[Dict]:
+        """Create overlapping chunks for a single session"""
+        session_id = session_dir.name
+        
+        # Check if required files exist
+        audio_path = session_dir / "audio_features.npy"
+        labels_path = session_dir / "diarization_labels.npy"
+        nframes_path = session_dir / "nframes.txt"
+        
+        if not (audio_path.exists() and labels_path.exists() and nframes_path.exists()):
+            print(f"⚠ Skipping {session_id}: Missing required files")
+            return []
+        
+        # Load data
         try:
-            audio_features = np.load(audio_path)
-            total_frames = audio_features.shape[0]
-            total_duration = total_frames / frame_rate
+            with open(nframes_path, 'r') as f:
+                total_frames = int(f.read().strip())
+            
+            labels = np.load(labels_path)
+            speaker_ids = self.get_session_speakers(session_dir)
+            num_speakers = len(speaker_ids)
+            
+            print(f"Processing {session_id}: {total_frames} frames, {num_speakers} speakers")
+            
         except Exception as e:
-            print(f"Error loading {audio_path}: {e}, skipping session...")
-            continue
+            print(f"❌ Error loading data for {session_id}: {e}")
+            return []
         
-        # Get speaker files
-        speaker_dir = os.path.join(session_dir, 'speakers')
-        label_dir = os.path.join(session_dir, 'labels')
+        chunks = []
+        start_frame = 0
         
-        if not os.path.exists(speaker_dir) or not os.path.exists(label_dir):
-            print(f"Warning: speaker or label directory not found in {session_dir}, skipping...")
-            continue
+        while start_frame + self.chunk_frames <= total_frames:
+            end_frame = start_frame + self.chunk_frames
             
-        speaker_files = sorted([f for f in os.listdir(speaker_dir) if f.endswith('_frames.npy')])
-        label_files = sorted([f for f in os.listdir(label_dir) if f.endswith('_labels.npy')])
-        
-        if len(speaker_files) != len(label_files):
-            print(f"Warning: Mismatch between speaker files ({len(speaker_files)}) and label files ({len(label_files)}) in {session_dir}")
-            continue
+            # Calculate times in seconds
+            start_time = start_frame / self.fps
+            end_time = end_frame / self.fps
             
-        num_speakers = len(speaker_files)
-        
-        # Verify all speaker files have corresponding label files
-        for spk_file in speaker_files:
-            spk_id = spk_file.replace('_frames.npy', '')
-            expected_label_file = f"{spk_id}_labels.npy"
-            if expected_label_file not in label_files:
-                print(f"Warning: Missing label file {expected_label_file} for speaker {spk_file}")
-        
-        # Create overlapping chunks
-        chunk_frames = int(chunk_duration * frame_rate)
-        step_frames = int(chunk_frames * (1 - overlap))
-        
-        if chunk_frames > total_frames:
-            print(f"Warning: Chunk duration {chunk_duration}s exceeds total duration {total_duration:.2f}s for {session_dir}")
-            continue
-            
-        for start_frame in range(0, total_frames - chunk_frames + 1, step_frames):
-            end_frame = start_frame + chunk_frames
-            start_time = start_frame / frame_rate
-            end_time = end_frame / frame_rate
-            
+            # Create chunk entry
             chunk_data = {
-                'session_id': os.path.basename(session_dir),
+                'session_id': session_id,
                 'start_time': start_time,
                 'end_time': end_time,
                 'start_frame': start_frame,
                 'end_frame': end_frame,
-                'audio_path': os.path.abspath(audio_path),
+                'audio_path': str(audio_path),
                 'num_speakers': num_speakers
             }
             
-            # Add speaker-specific paths
-            for i, spk_file in enumerate(speaker_files):
-                spk_id = spk_file.replace('_frames.npy', '')
-                chunk_data[f'spk{i}_video_path'] = os.path.abspath(os.path.join(speaker_dir, spk_file))
+            # Add speaker-specific paths and labels
+            for i, speaker_id in enumerate(speaker_ids):
+                video_path = session_dir / "video_features" / f"{speaker_id}.npy"
                 
-                # Find corresponding label file
-                label_file = f"{spk_id}_labels.npy"
-                label_path = os.path.join(label_dir, label_file)
-                if os.path.exists(label_path):
-                    chunk_data[f'spk{i}_label_path'] = os.path.abspath(label_path)
-                else:
-                    print(f"Warning: Label file {label_path} not found")
-                    chunk_data[f'spk{i}_label_path'] = "MISSING"
+                chunk_data[f'spk{i}_video_path'] = str(video_path)
+                chunk_data[f'spk{i}_label_path'] = str(labels_path)
+                chunk_data[f'spk{i}_start_frame'] = start_frame
+                chunk_data[f'spk{i}_end_frame'] = end_frame
+            
+            # Fill remaining speaker columns with empty values
+            for i in range(len(speaker_ids), max_speakers):
+                chunk_data[f'spk{i}_video_path'] = ''
+                chunk_data[f'spk{i}_label_path'] = ''  
+                chunk_data[f'spk{i}_start_frame'] = -1
+                chunk_data[f'spk{i}_end_frame'] = -1
             
             chunks.append(chunk_data)
+            start_frame += self.stride_frames
         
-        print(f"  Created {len([c for c in chunks if c['session_id'] == os.path.basename(session_dir)])} chunks for {session_dir}")
+        print(f"  Created {len(chunks)} chunks for {session_id}")
+        return chunks
     
-    return pd.DataFrame(chunks)
+    def create_training_csv(self):
+        """Create the complete training CSV file"""
+        print("Creating training CSV with overlapping chunks...")
+        print(f"Chunk duration: {self.chunk_duration}s, Stride: {self.stride}s, FPS: {self.fps}")
+        
+        # Find maximum number of speakers
+        max_speakers = self.find_max_speakers()
+        if max_speakers == 0:
+            print("❌ No sessions found!")
+            return
+        
+        all_chunks = []
+        
+        # Process each session
+        session_dirs = sorted([d for d in self.dataset_dir.iterdir() if d.is_dir()])
+        print(f"Found {len(session_dirs)} sessions")
+        
+        for session_dir in session_dirs:
+            chunks = self.create_chunks_for_session(session_dir, max_speakers)
+            all_chunks.extend(chunks)
+        
+        # Create DataFrame
+        if not all_chunks:
+            print("❌ No chunks created!")
+            return
+        
+        df = pd.DataFrame(all_chunks)
+        
+        # Reorder columns for better readability
+        base_columns = ['session_id', 'start_time', 'end_time', 'start_frame', 'end_frame', 
+                       'audio_path', 'num_speakers']
+        
+        speaker_columns = []
+        for i in range(max_speakers):
+            speaker_columns.extend([f'spk{i}_video_path', f'spk{i}_label_path', 
+                                  f'spk{i}_start_frame', f'spk{i}_end_frame'])
+        
+        final_columns = base_columns + speaker_columns
+        df = df[final_columns]
+        
+        # Save CSV
+        df.to_csv(self.output_csv, index=False)
+        print(f"✅ Successfully created {self.output_csv}")
+        print(f"📊 Total chunks: {len(df)}")
+        print(f"👥 Maximum speakers: {max_speakers}")
+        print(f"📋 Columns: {len(df.columns)}")
+        
+        # Show sample
+        print("\n📄 Sample of the CSV:")
+        print(df.head(3).to_string(max_cols=15))  # Show first few columns only
+        
+        return df
 
-def main():
-    # Path to your dataset relative to this script
-    dataset_base_path = "../../../data-bin/data-bin/modified_dev/dev/"
+# Usage
+if __name__ == "__main__":
+    # Configuration
+    DATASET_DIR = "/home/speech-audio-research/22b3965/train-bin/tran-bin/modified-train"  # Your converted dataset path
+    OUTPUT_CSV = "/home/speech-audio-research/22b3965/AVSD/local/training/training_chunks.csv"
     
-    # Get all session directories (session_1 to session_25)
-    session_dirs = []
-    for i in range(40, 45):
-        session_path = os.path.join(dataset_base_path, f"session_{i}")
-        session_dirs.append(session_path)
-
-    for i in range(48, 58):
-        session_path = os.path.join(dataset_base_path, f"session_{i}")
-        session_dirs.append(session_path)
-
-    for i in range(132, 142):
-        session_path = os.path.join(dataset_base_path, f"session_{i}")
-        session_dirs.append(session_path)
-    
-    # Alternative: Auto-detect all session folders
-    # session_dirs = glob.glob(os.path.join(dataset_base_path, "session_*"))
-    # session_dirs = [d for d in session_dirs if os.path.isdir(d)]
-    
-    print(f"Found {len(session_dirs)} session directories")
-    
-    if len(session_dirs) == 0:
-        print("No session directories found! Please check the path:")
-        print(f"Current working directory: {os.getcwd()}")
-        print(f"Looking for: {dataset_base_path}")
-        abs_path = os.path.abspath(dataset_base_path)
-        print(f"Absolute path: {abs_path}")
-        print(f"Exists: {os.path.exists(abs_path)}")
-        return
-    
-    # Create training chunks
-    print("Creating training chunks...")
-    df = create_training_chunks(
-        session_dirs, 
-        chunk_duration=8.0,    # 8-second chunks
-        frame_rate=25.0,       # 25 fps
-        overlap=0.5            # 50% overlap
+    # Create CSV creator
+    creator = TrainingCSVCreator(
+        dataset_dir=DATASET_DIR,
+        output_csv=OUTPUT_CSV,
+        chunk_duration=8.0,  # 8-second chunks
+        stride=4.0,          # 4-second stride (50% overlap)
+        fps=25               # 25 FPS
     )
     
-    # Save to CSV
-    output_csv = "training_chunks.csv"
-    df.to_csv(output_csv, index=False)
-    
-    print(f"\n✅ Successfully created {output_csv}")
-    print(f"📊 Total chunks created: {len(df)}")
-    print(f"🎯 Chunk duration: 8.0 seconds")
-    print(f"🔄 Overlap: 50%")
-    print(f"📁 Sessions processed: {len(session_dirs)}")
-    
-    # Show some statistics
-    if len(df) > 0:
-        print(f"\n📈 Statistics:")
-        print(f"   Average chunks per session: {len(df) / len(session_dirs):.1f}")
-        print(f"   Total speakers across all chunks: {df['num_speakers'].sum()}")
-        print(f"   Max speakers in a chunk: {df['num_speakers'].max()}")
-        print(f"   Min speakers in a chunk: {df['num_speakers'].min()}")
-        
-        # Show first few chunks
-        print(f"\n📋 First 3 chunks:")
-        print(df[['session_id', 'start_time', 'end_time', 'num_speakers']].head(3).to_string(index=False))
-
-if __name__ == "__main__":
-    main()
+    # Generate the CSV
+    df = creator.create_training_csv()
