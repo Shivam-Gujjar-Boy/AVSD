@@ -5,7 +5,7 @@ import numpy as np
 import os
 
 class AVDiarizationDataset(Dataset):
-    def __init__(self, csv_path, max_speakers=4):
+    def __init__(self, csv_path, max_speakers=8):
         """
         Dataset for Audio-Visual Speaker Diarization
         
@@ -33,10 +33,10 @@ class AVDiarizationDataset(Dataset):
         diarization_labels = []
         
         for i in range(self.max_speakers):
-            video_path = row[f'spk{i}_video_path']
-            label_path = row[f'spk{i}_label_path']
+            video_path = row.get(f'spk{i}_video_path', 'MISSING')
+            label_path = row.get(f'spk{i}_label_path', '')
             
-            if video_path and pd.notna(video_path) and video_path != '':
+            if video_path and pd.notna(video_path) and video_path != '' and video_path != 'MISSING':
                 # Load video frames
                 video_frames = np.load(video_path)
                 video_chunk = video_frames[start_f:end_f]  # (chunk_frames, 96, 96)
@@ -44,7 +44,12 @@ class AVDiarizationDataset(Dataset):
                 
                 # Load labels
                 labels = np.load(label_path)
-                label_chunk = labels[start_f:end_f, i]  # Binary labels for this speaker
+                if labels.ndim == 1:
+                    label_chunk = labels[start_f:end_f]
+                elif labels.shape[1] > i:
+                    label_chunk = labels[start_f:end_f, i]  # Binary labels for this speaker
+                else:
+                    label_chunk = np.zeros(end_f - start_f)
                 diarization_labels.append(label_chunk)
             else:
                 # Create dummy data for missing speakers
@@ -64,7 +69,7 @@ class AVDiarizationDataset(Dataset):
             'nframes': torch.tensor(end_f - start_f)
         }
 
-def get_dataloader(csv_path, batch_size=8, shuffle=True, num_workers=4, max_speakers=4):
+def get_dataloader(csv_path, batch_size=8, shuffle=True, num_workers=4, max_speakers=8):
     """
     Create DataLoader for training
     

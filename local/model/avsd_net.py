@@ -128,7 +128,7 @@ class AIVECTOR_ConformerVEmbedding_SD_JOINT(nn.Module):
         super(AIVECTOR_ConformerVEmbedding_SD_JOINT, self).__init__()
         print("Initializing CASA-Net AVSD Model...")
 
-        self.v_embedding = ASD_Wrapper_Visual_Encoder()
+        self.v_embedding = ASD_Wrapper_Visual_Encoder(num_speakers=configs["output_speaker"])
         self.av_sd = AIVECTOR_CASA_SD(configs)
 
         print("Model initialization complete!")
@@ -152,7 +152,7 @@ if __name__=='__main__':
         "input_dim": 40,
         "average_pooling": 3,
         "speaker_embedding_dim": 100,
-        "output_speaker": 4,
+        "output_speaker": 8,
         "audio_output_dim": 256,
         "video_embedding_dim": 256,
         "num_attention_heads": 4,

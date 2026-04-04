@@ -31,7 +31,7 @@ def train_avsd(args):
         "input_dim": 40,
         "average_pooling": 3,
         "speaker_embedding_dim": 100,
-        "output_speaker": 4,
+        "output_speaker": 8,
         "audio_output_dim": 256,
         "video_embedding_dim": 256,
         "num_attention_heads": 4,
@@ -44,7 +44,7 @@ def train_avsd(args):
     BATCH_SIZE = 8
     NUM_EPOCHS = args.epochs if args.epochs is not None else 100
     LEARNING_RATE = 1e-4
-    CHECKPOINT_DIR = "checkpoints"
+    CHECKPOINT_DIR = "checkpoints_new"
     
     # Create checkpoint directory
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)

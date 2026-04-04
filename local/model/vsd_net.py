@@ -85,7 +85,7 @@ class visual_encoder(nn.Module):
                 m.bias.data.zero_()
 
 class ASD_Wrapper_Visual_Encoder(nn.Module):
-    def __init__(self, num_speakers=4):
+    def __init__(self, num_speakers=8):
         super(ASD_Wrapper_Visual_Encoder, self).__init__()
         self.asd_encoder = visual_encoder()
         self.proj = nn.Linear(128, 256)
