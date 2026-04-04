@@ -1,0 +1,5 @@
+1. Try a method to integrate speaker embeddings (basically iterate over predictions to refine embeddings)
+2. Train the model for more epochs
+3. Study various visual modality concatenation methods (CASA-Net, and others - how exactly visual component is added)
+4. Add some pre-processing for denoising and dereverberation to the NN
+5. Common things + Differences across various models

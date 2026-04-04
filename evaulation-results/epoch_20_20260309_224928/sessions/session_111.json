@@ -1,0 +1,37 @@
+{
+  "session_id": "session_111",
+  "total_frames": 9400.0,
+  "n_true_speakers": 2,
+  "n_chunks": 47,
+  "bce_loss": 3.238709,
+  "mean_f1": 0.0,
+  "mean_accuracy": 0.306,
+  "per_speaker": [
+    {
+      "tp": 0.0,
+      "fp": 0.0,
+      "fn": 6679.0,
+      "tn": 2721.0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "accuracy": 0.289468085106383
+    },
+    {
+      "tp": 0.0,
+      "fp": 0.0,
+      "fn": 6369.0,
+      "tn": 3031.0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "accuracy": 0.3224468085106383
+    }
+  ],
+  "DER": 100.0,
+  "JER": 100.0,
+  "FA": 0.0,
+  "MISS": 9097.0,
+  "CONF": 0.0,
+  "total_ref_speech_frames": 9097.0
+}

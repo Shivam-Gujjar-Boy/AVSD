@@ -3,12 +3,29 @@ import torch.nn as nn
 from torch.optim import Adam
 import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import tqdm
-import time
 import os
+import argparse
 from dataloader import get_dataloader
 from avsd_net import AIVECTOR_ConformerVEmbedding_SD_JOINT
 
-def train_avsd():
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train AVSD model")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Checkpoint path to resume from (e.g., checkpoints/model_epoch_20.pth)",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Total number of epochs to run (overrides default 100)",
+    )
+    return parser.parse_args()
+
+
+def train_avsd(args):
     # Configuration
     CONFIG = {
         "input_dim": 40,
@@ -25,7 +42,7 @@ def train_avsd():
     # Training settings
     CSV_PATH = "/home/speech-audio-research/22b3965/AVSD/local/training/training_chunks.csv"
     BATCH_SIZE = 8
-    NUM_EPOCHS = 100
+    NUM_EPOCHS = args.epochs if args.epochs is not None else 100
     LEARNING_RATE = 1e-4
     CHECKPOINT_DIR = "checkpoints"
     
@@ -45,6 +62,25 @@ def train_avsd():
     criterion = nn.BCEWithLogitsLoss()
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+
+    # Optional resume
+    start_epoch = 1
+    if args.resume:
+        if not os.path.isfile(args.resume):
+            raise FileNotFoundError(f"Resume checkpoint not found: {args.resume}")
+
+        print(f"🔄 Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+        if "optimizer_state_dict" in checkpoint and checkpoint["optimizer_state_dict"] is not None:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        if "scheduler_state_dict" in checkpoint and checkpoint["scheduler_state_dict"] is not None:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+
+        start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        print(f"✅ Resume successful. Starting from epoch {start_epoch}/{NUM_EPOCHS}")
     
     # DataLoader - REDUCED WORKERS TO 2 FOR CLUSTER STABILITY
     print("🔄 Loading data...")
@@ -59,7 +95,7 @@ def train_avsd():
     print(f"📊 Starting training with {len(train_loader)} batches per epoch")
     
     # Training loop
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(start_epoch - 1, NUM_EPOCHS):
         model.train()
         epoch_loss = 0
         batch_count = 0
@@ -126,6 +162,7 @@ def train_avsd():
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
             'loss': avg_epoch_loss,
             'config': CONFIG
         }, checkpoint_path)
@@ -134,4 +171,5 @@ def train_avsd():
     print("✅ Training completed!")
 
 if __name__ == "__main__":
-    train_avsd()
+    args = parse_args()
+    train_avsd(args)
