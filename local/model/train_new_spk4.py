@@ -6,16 +6,20 @@ from tqdm import tqdm
 import os
 import argparse
 from contextlib import nullcontext
-from dataloader import get_dataloader
-from avsd_net import AIVECTOR_ConformerVEmbedding_SD_JOINT
+from dataloader_spk4 import get_dataloader
+from avsd_net_spk4 import AIVECTOR_ConformerVEmbedding_SD_JOINT
+
+SPEAKER_CAP = 4
+CHECKPOINT_DIR = "checkpoints_for_4"
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train AVSD model")
+    parser = argparse.ArgumentParser(description="Train AVSD model (speaker cap 4)")
     parser.add_argument(
         "--resume",
         type=str,
         default="",
-        help="Checkpoint path to resume from (e.g., checkpoints/model_epoch_20.pth)",
+        help="Checkpoint path to resume from (e.g., checkpoints_for_4/model_epoch_20.pth)",
     )
     parser.add_argument(
         "--epochs",
@@ -47,6 +51,24 @@ def parse_args():
         help="Disable automatic mixed precision training.",
     )
     parser.add_argument(
+        "--lr",
+        type=float,
+        default=5e-4,
+        help="Learning rate (eta). Default 5e-4. Increase for faster convergence, decrease for stability.",
+    )
+    parser.add_argument(
+        "--lr-step-size",
+        type=int,
+        default=15,
+        help="LR scheduler step size (how many epochs before decay). Default 15. Lower = faster decay.",
+    )
+    parser.add_argument(
+        "--lr-gamma",
+        type=float,
+        default=0.1,
+        help="LR scheduler decay factor (lr *= gamma every step-size epochs). Default 0.1.",
+    )
+    parser.add_argument(
         "--train-visual-encoder",
         action="store_true",
         help="Enable gradients for visual encoder. By default, it is frozen for memory efficiency.",
@@ -55,40 +77,34 @@ def parse_args():
 
 
 def train_avsd(args):
-    # Configuration
     CONFIG = {
         "input_dim": 40,
         "average_pooling": 3,
         "speaker_embedding_dim": 100,
-        "output_speaker": 4,
+        "output_speaker": SPEAKER_CAP,
         "audio_output_dim": 256,
         "video_embedding_dim": 256,
         "num_attention_heads": 4,
         "decoder_hidden_dim": 256,
         "dropout": 0.1,
     }
-    
-    # Training settings
+
     CSV_PATH = "/home/speech-audio-research/22b3965/AVSD/local/training/training_chunks.csv"
     BATCH_SIZE = args.batch_size
     NUM_EPOCHS = args.epochs if args.epochs is not None else 100
-    LEARNING_RATE = 1e-4
-    CHECKPOINT_DIR = "checkpoints_new"
+    LEARNING_RATE = args.lr
 
     if args.grad_accum_steps < 1:
         raise ValueError("--grad-accum-steps must be >= 1")
-    
-    # Create checkpoint directory
+
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    
-    # Device
+
     if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🚀 Using device: {device}")
-    
-    # Initialize model
+
     print("🔄 Initializing model...")
     model = AIVECTOR_ConformerVEmbedding_SD_JOINT(
         CONFIG,
@@ -97,14 +113,22 @@ def train_avsd(args):
     model = model.to(device)
 
     use_amp = (device.type == "cuda") and (not args.disable_amp)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    
-    # Loss and optimizer
+    amp_mod = getattr(torch, "amp", None)
+    amp_autocast_ctor = getattr(amp_mod, "autocast", None) if amp_mod is not None else None
+    amp_grad_scaler_ctor = getattr(amp_mod, "GradScaler", None) if amp_mod is not None else None
+    amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+    scaler = (
+        amp_grad_scaler_ctor("cuda", enabled=(use_amp and amp_dtype == torch.float16))
+        if amp_grad_scaler_ctor is not None
+        else torch.cuda.amp.GradScaler(enabled=(use_amp and amp_dtype == torch.float16))
+    )
+    print(f"🧠 AMP enabled: {use_amp}, dtype: {'bf16' if amp_dtype == torch.bfloat16 else 'fp16'}")
+
     criterion = nn.BCEWithLogitsLoss()
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    print(f"📚 Learning rate: {LEARNING_RATE}, scheduler: StepLR(step_size={args.lr_step_size}, gamma={args.lr_gamma})")
 
-    # Optional resume
     start_epoch = 1
     if args.resume:
         if not os.path.isfile(args.resume):
@@ -122,8 +146,7 @@ def train_avsd(args):
 
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
         print(f"✅ Resume successful. Starting from epoch {start_epoch}/{NUM_EPOCHS}")
-    
-    # DataLoader - REDUCED WORKERS TO 2 FOR CLUSTER STABILITY
+
     print("🔄 Loading data...")
     train_loader = get_dataloader(
         csv_path=CSV_PATH,
@@ -133,10 +156,9 @@ def train_avsd(args):
         max_speakers=CONFIG["output_speaker"],
         max_session_speakers=CONFIG["output_speaker"],
     )
-    
+
     print(f"📊 Starting training with {len(train_loader)} batches per epoch")
-    
-    # Training loop
+
     for epoch in range(start_epoch - 1, NUM_EPOCHS):
         model.train()
         if not args.train_visual_encoder:
@@ -144,55 +166,57 @@ def train_avsd(args):
         epoch_loss = 0
         batch_count = 0
         optimizer.zero_grad(set_to_none=True)
-        
+
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{NUM_EPOCHS}')
-        
+
         for batch_idx, batch in enumerate(progress_bar):
             batch_loss_value = None
-            # Move data to device
             audio = batch['audio'].to(device, non_blocking=True)
             video = batch['video'].to(device, non_blocking=True)
             labels = batch['labels'].to(device, non_blocking=True)
             nframes = batch['nframes'].tolist()
-            
-            # Create dummy audio embeddings (as per your model)
+
             audio_embed = torch.zeros(
                 audio.size(0),
                 CONFIG["output_speaker"],
                 100,
                 device=device,
             )
-            
-            # Forward pass
-            amp_context = torch.cuda.amp.autocast(enabled=use_amp) if device.type == "cuda" else nullcontext()
+
+            if device.type == "cuda":
+                if amp_autocast_ctor is not None:
+                    amp_context = amp_autocast_ctor(device_type="cuda", enabled=use_amp, dtype=amp_dtype)
+                else:
+                    amp_context = torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype)
+            else:
+                amp_context = nullcontext()
 
             try:
                 with amp_context:
                     outputs = model(audio, audio_embed, video, nframes)
-            
-                # Compute loss for each speaker
+
                 batch_loss = torch.zeros((), device=device)
                 valid_speakers = 0
-            
+
                 for i, output in enumerate(outputs):
                     if output is not None and len(output) > 0:
-                        # Get ground truth for this speaker
                         gt_labels = labels[:, :, i].reshape(-1, 1)
-                        
-                        # Ensure same length
                         min_len = min(len(output), len(gt_labels))
                         if min_len > 0:
                             speaker_loss = criterion(output[:min_len], gt_labels[:min_len])
                             batch_loss += speaker_loss
                             valid_speakers += 1
-            
-                # Average loss across speakers
+
                 if valid_speakers > 0:
                     batch_loss = batch_loss / valid_speakers
+                    if not torch.isfinite(batch_loss):
+                        print(f"⚠️ Non-finite loss at batch {batch_idx + 1}, skipping optimizer step")
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+
                     batch_loss_value = float(batch_loss.detach().item())
                     scaled_loss = batch_loss / args.grad_accum_steps
 
-                    # Backward pass with optional AMP and gradient accumulation
                     if use_amp:
                         scaler.scale(scaled_loss).backward()
                     else:
@@ -216,21 +240,17 @@ def train_avsd(args):
                     torch.cuda.empty_cache()
                     continue
                 raise
-            
-            # Update progress bar
+
             progress_bar.set_postfix({
                 'Loss': f'{batch_loss_value:.4f}' if batch_loss_value is not None else 'N/A',
                 'Avg Loss': f'{(epoch_loss/batch_count):.4f}' if batch_count > 0 else 'N/A'
             })
-        
-        # Epoch statistics
+
         avg_epoch_loss = epoch_loss / batch_count if batch_count > 0 else 0
-        print(f'📈 Epoch {epoch+1}/{NUM_EPOCHS}, Average Loss: {avg_epoch_loss:.4f}')
-        
-        # Learning rate scheduling
+        print(f'📈 Epoch {epoch+1}/{NUM_EPOCHS}, Average Loss: {avg_epoch_loss:.4f}, LR: {optimizer.param_groups[0]["lr"]:.2e}')
+
         scheduler.step()
-        
-        # 🚀🚀🚀 CHANGED: Save checkpoint EVERY EPOCH 🚀🚀🚀
+
         checkpoint_path = os.path.join(CHECKPOINT_DIR, f'model_epoch_{epoch+1}.pth')
         torch.save({
             'epoch': epoch + 1,
@@ -241,8 +261,9 @@ def train_avsd(args):
             'config': CONFIG
         }, checkpoint_path)
         print(f'💾 Checkpoint saved: {checkpoint_path}')
-    
+
     print("✅ Training completed!")
+
 
 if __name__ == "__main__":
     args = parse_args()

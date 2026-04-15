@@ -356,13 +356,15 @@ def _run_inference_pass(
 
     # CRITICAL: patch num_speakers in the visual encoder wrapper so that the
     # reshape inside ASD_Wrapper_Visual_Encoder.forward works correctly.
-    original_ns = model.v_embedding.num_speakers
-    model.v_embedding.num_speakers = model_speakers
+    v_embedding_wrapper = model.v_embedding
+    original_ns = getattr(v_embedding_wrapper, "num_speakers", None)
+    setattr(v_embedding_wrapper, "num_speakers", model_speakers)
 
     with torch.no_grad():
         outputs = model(audio_sliced, audio_embed, video_tensor, [nframes])
 
-    model.v_embedding.num_speakers = original_ns  # restore
+    if original_ns is not None:
+        setattr(v_embedding_wrapper, "num_speakers", original_ns)  # restore
 
     # outputs is a list of len model_speakers, each element shape: (sum_valid_frames_across_batch, 1)
     # For batch_size=1, each element has shape (nframes, 1)
@@ -566,6 +568,7 @@ def evaluate_session(
     chunk_frames: int = CHUNK_FRAMES,
     stride_frames: int = STRIDE_FRAMES,
     threshold: float = THRESHOLD,
+    thresholds: Optional[List[float]] = None,
 ) -> Dict:
     """
     Run inference over all chunks of a session, aggregate, compute metrics.
@@ -625,17 +628,33 @@ def evaluate_session(
     logits = all_logits[:eff_frames]
     labels = all_labels[:eff_frames]
 
-    # ── binary predictions ────────────────────────────────────────────
-    probs = 1.0 / (1.0 + np.exp(-logits))                           # sigmoid
-    preds = (probs >= threshold).astype(np.float32)
-
-    # ── metrics ───────────────────────────────────────────────────────
     session_loss      = float(np.mean(chunk_losses)) if chunk_losses else float("nan")
-    per_spk_metrics   = compute_per_speaker_metrics(preds, labels)
-    der_metrics       = compute_der(preds, labels, use_hungarian=True)
 
-    mean_f1 = float(np.mean([m["f1"] for m in per_spk_metrics]))
-    mean_acc = float(np.mean([m["accuracy"] for m in per_spk_metrics]))
+    thresholds_to_eval = thresholds if thresholds is not None else [threshold]
+    thresholds_to_eval = [float(t) for t in thresholds_to_eval]
+    threshold_results: Dict[str, Dict] = {}
+
+    probs = 1.0 / (1.0 + np.exp(-logits))  # sigmoid
+
+    for thr in thresholds_to_eval:
+        preds = (probs >= thr).astype(np.float32)
+        per_spk_metrics = compute_per_speaker_metrics(preds, labels)
+        der_metrics = compute_der(preds, labels, use_hungarian=True)
+
+        mean_f1 = float(np.mean([m["f1"] for m in per_spk_metrics]))
+        mean_acc = float(np.mean([m["accuracy"] for m in per_spk_metrics]))
+
+        threshold_key = f"{thr:.6f}".rstrip("0").rstrip(".")
+        threshold_results[threshold_key] = {
+            "threshold": thr,
+            "mean_f1": round(mean_f1, 4),
+            "mean_accuracy": round(mean_acc, 4),
+            "per_speaker": per_spk_metrics,
+            **der_metrics,
+        }
+
+    primary_threshold_key = f"{thresholds_to_eval[0]:.6f}".rstrip("0").rstrip(".")
+    primary_metrics = threshold_results[primary_threshold_key]
 
     result = {
         "session_id":        session.session_id,
@@ -645,23 +664,43 @@ def evaluate_session(
         "n_true_speakers":   N_true,
         "n_chunks":          chunk_count,
         "bce_loss":          round(session_loss, 6),
-        "mean_f1":           round(mean_f1, 4),
-        "mean_accuracy":     round(mean_acc, 4),
-        "per_speaker":       per_spk_metrics,
-        **der_metrics,
+        "threshold":         primary_metrics["threshold"],
+        "threshold_metrics": threshold_results,
+        "mean_f1":           primary_metrics["mean_f1"],
+        "mean_accuracy":     primary_metrics["mean_accuracy"],
+        "per_speaker":       primary_metrics["per_speaker"],
+        "DER":               primary_metrics["DER"],
+        "JER":               primary_metrics["JER"],
+        "FA":                primary_metrics["FA"],
+        "MISS":              primary_metrics["MISS"],
+        "CONF":              primary_metrics["CONF"],
+        "total_ref_speech_frames": primary_metrics["total_ref_speech_frames"],
+        "total_frames_eval":  primary_metrics["total_frames"],
     }
 
-    logger.info(
-        "    loss=%.4f  DER=%.2f%%  JER=%.2f%%  F1=%.4f  "
-        "FA=%d  MISS=%d  CONF=%d",
-        session_loss,
-        der_metrics["DER"] if not np.isnan(der_metrics["DER"]) else -1,
-        der_metrics["JER"] if not np.isnan(der_metrics["JER"]) else -1,
-        mean_f1,
-        int(der_metrics["FA"]),
-        int(der_metrics["MISS"]),
-        int(der_metrics["CONF"]),
-    )
+    if len(thresholds_to_eval) == 1:
+        logger.info(
+            "    loss=%.4f  threshold=%.3f  DER=%.2f%%  JER=%.2f%%  F1=%.4f  "
+            "FA=%d  MISS=%d  CONF=%d",
+            session_loss,
+            primary_metrics["threshold"],
+            primary_metrics["DER"] if not np.isnan(primary_metrics["DER"]) else -1,
+            primary_metrics["JER"] if not np.isnan(primary_metrics["JER"]) else -1,
+            primary_metrics["mean_f1"],
+            int(primary_metrics["FA"]),
+            int(primary_metrics["MISS"]),
+            int(primary_metrics["CONF"]),
+        )
+    else:
+        logger.info(
+            "    loss=%.4f  thresholds=%d  primary=%.3f  DER=%.2f%%  JER=%.2f%%  F1=%.4f",
+            session_loss,
+            len(thresholds_to_eval),
+            primary_metrics["threshold"],
+            primary_metrics["DER"] if not np.isnan(primary_metrics["DER"]) else -1,
+            primary_metrics["JER"] if not np.isnan(primary_metrics["JER"]) else -1,
+            primary_metrics["mean_f1"],
+        )
 
     return result
 
@@ -691,7 +730,7 @@ def save_global_metrics(metrics: Dict, output_dir: str, logger: logging.Logger):
 # GLOBAL METRIC AGGREGATION
 # ════════════════════════════════════════════════════════════════════════════
 
-def aggregate_global_metrics(session_results: List[Dict]) -> Dict:
+def aggregate_global_metrics(session_results: List[Dict], threshold_key: Optional[str] = None) -> Dict:
     """
     Aggregate per-session results into global metrics.
 
@@ -701,29 +740,87 @@ def aggregate_global_metrics(session_results: List[Dict]) -> Dict:
     if not session_results:
         return {}
 
-    total_fa   = sum(r["FA"]   for r in session_results)
-    total_miss = sum(r["MISS"] for r in session_results)
-    total_conf = sum(r["CONF"] for r in session_results)
-    total_ref  = sum(r["total_ref_speech_frames"] for r in session_results)
+    if threshold_key is None:
+        total_fa   = sum(r["FA"]   for r in session_results)
+        total_miss = sum(r["MISS"] for r in session_results)
+        total_conf = sum(r["CONF"] for r in session_results)
+        total_ref  = sum(r["total_ref_speech_frames"] for r in session_results)
+
+        global_der = (
+            (total_fa + total_miss + total_conf) / total_ref * 100.0
+            if total_ref > 0
+            else float("nan")
+        )
+
+        jer_values = [
+            r["JER"] for r in session_results if not np.isnan(r["JER"])
+        ]
+        global_jer = float(np.mean(jer_values)) if jer_values else float("nan")
+
+        losses  = [r["bce_loss"] for r in session_results if not np.isnan(r["bce_loss"])]
+        f1s     = [r["mean_f1"]  for r in session_results]
+        accs    = [r["mean_accuracy"] for r in session_results]
+
+        return {
+            "n_sessions":          len(session_results),
+            "global_DER":          round(global_der, 4),
+            "global_JER":          round(global_jer, 4),
+            "macro_bce_loss":      round(float(np.mean(losses)), 6) if losses else float("nan"),
+            "macro_mean_f1":       round(float(np.mean(f1s)),    4),
+            "macro_mean_accuracy": round(float(np.mean(accs)),   4),
+            "total_FA":            total_fa,
+            "total_MISS":          total_miss,
+            "total_CONF":          total_conf,
+            "total_ref_speech_frames": total_ref,
+            "per_session_DER": {
+                r["session_id"]: r["DER"] for r in session_results
+            },
+            "per_session_loss": {
+                r["session_id"]: r["bce_loss"] for r in session_results
+            },
+        }
+
+    total_fa   = 0.0
+    total_miss = 0.0
+    total_conf = 0.0
+    total_ref  = 0.0
+    jer_values = []
+    losses     = []
+    f1s        = []
+    accs       = []
+    per_session_der = {}
+    per_session_loss = {}
+
+    for r in session_results:
+        threshold_results = r.get("threshold_metrics", {})
+        if threshold_key not in threshold_results:
+            continue
+        metrics = threshold_results[threshold_key]
+
+        total_fa += metrics["FA"]
+        total_miss += metrics["MISS"]
+        total_conf += metrics["CONF"]
+        total_ref += metrics["total_ref_speech_frames"]
+
+        if not np.isnan(metrics["JER"]):
+            jer_values.append(metrics["JER"])
+        if not np.isnan(r.get("bce_loss", float("nan"))):
+            losses.append(r["bce_loss"])
+        f1s.append(metrics["mean_f1"])
+        accs.append(metrics["mean_accuracy"])
+        per_session_der[r["session_id"]] = metrics["DER"]
+        per_session_loss[r["session_id"]] = r["bce_loss"]
 
     global_der = (
         (total_fa + total_miss + total_conf) / total_ref * 100.0
         if total_ref > 0
         else float("nan")
     )
-
-    # JER: weighted average across sessions
-    jer_values = [
-        r["JER"] for r in session_results if not np.isnan(r["JER"])
-    ]
     global_jer = float(np.mean(jer_values)) if jer_values else float("nan")
 
-    losses  = [r["bce_loss"] for r in session_results if not np.isnan(r["bce_loss"])]
-    f1s     = [r["mean_f1"]  for r in session_results]
-    accs    = [r["mean_accuracy"] for r in session_results]
-
     return {
-        "n_sessions":          len(session_results),
+        "threshold_key":       threshold_key,
+        "n_sessions":          len(per_session_der),
         "global_DER":          round(global_der, 4),
         "global_JER":          round(global_jer, 4),
         "macro_bce_loss":      round(float(np.mean(losses)), 6) if losses else float("nan"),
@@ -733,12 +830,32 @@ def aggregate_global_metrics(session_results: List[Dict]) -> Dict:
         "total_MISS":          total_miss,
         "total_CONF":          total_conf,
         "total_ref_speech_frames": total_ref,
-        "per_session_DER": {
-            r["session_id"]: r["DER"] for r in session_results
-        },
-        "per_session_loss": {
-            r["session_id"]: r["bce_loss"] for r in session_results
-        },
+        "per_session_DER":     per_session_der,
+        "per_session_loss":    per_session_loss,
+    }
+
+
+def aggregate_threshold_sweep(session_results: List[Dict], thresholds: List[float]) -> Dict:
+    """Aggregate metrics for each threshold from cached session results."""
+    sweep = {}
+    best_threshold_key = None
+    best_der = float("inf")
+
+    for threshold in thresholds:
+        threshold_key = f"{float(threshold):.6f}".rstrip("0").rstrip(".")
+        metrics = aggregate_global_metrics(session_results, threshold_key=threshold_key)
+        sweep[threshold_key] = metrics
+
+        der_value = metrics.get("global_DER", float("nan"))
+        if not np.isnan(der_value) and der_value < best_der:
+            best_der = der_value
+            best_threshold_key = threshold_key
+
+    return {
+        "thresholds": thresholds,
+        "metrics_by_threshold": sweep,
+        "best_threshold": best_threshold_key,
+        "best_metrics": sweep.get(best_threshold_key, {}),
     }
 
 
@@ -779,6 +896,10 @@ def parse_args():
         help=f"Sigmoid threshold for binary activity prediction. Default: {THRESHOLD}",
     )
     p.add_argument(
+        "--thresholds", nargs="*", type=float, default=None,
+        help="Optional list of thresholds to evaluate in one inference pass. Overrides --threshold.",
+    )
+    p.add_argument(
         "--device", default="auto",
         help='Device: "auto" (GPU if available), "cpu", "cuda", "cuda:0", etc.',
     )
@@ -808,8 +929,9 @@ def main():
     logger.info("AVSD Evaluation  |  checkpoint: %s", args.checkpoint)
     logger.info("eval_dir    : %s",  args.eval_dir)
     logger.info("output_dir  : %s",  args.output_dir)
-    logger.info("chunk_frames: %d   stride_frames: %d   threshold: %.3f",
-                args.chunk_frames, args.stride_frames, args.threshold)
+    thresholds = args.thresholds if args.thresholds else [args.threshold]
+    logger.info("chunk_frames: %d   stride_frames: %d   thresholds: %s",
+                args.chunk_frames, args.stride_frames, ", ".join(f"{t:.3f}" for t in thresholds))
     logger.info("=" * 70)
 
     # ── device ────────────────────────────────────────────────────────────
@@ -859,6 +981,7 @@ def main():
                 chunk_frames=args.chunk_frames,
                 stride_frames=args.stride_frames,
                 threshold=args.threshold,
+                thresholds=thresholds,
             )
             session_results.append(result)
             save_session_checkpoint(result, args.output_dir)
@@ -886,14 +1009,25 @@ def main():
                 elapsed / max(len(session_results), 1))
 
     # ── global aggregation ────────────────────────────────────────────────
-    global_metrics = aggregate_global_metrics(session_results)
+    primary_threshold_key = f"{float(thresholds[0]):.6f}".rstrip("0").rstrip(".")
+    global_metrics = aggregate_global_metrics(session_results, threshold_key=primary_threshold_key)
     global_metrics["elapsed_seconds"] = round(elapsed, 2)
     global_metrics["failed_sessions"] = failed_sessions
     global_metrics["checkpoint"]      = args.checkpoint
     global_metrics["eval_dir"]        = args.eval_dir
-    global_metrics["threshold"]       = args.threshold
+    global_metrics["threshold"]       = thresholds[0]
+
+    sweep_metrics = aggregate_threshold_sweep(session_results, thresholds)
+    sweep_metrics["elapsed_seconds"] = round(elapsed, 2)
+    sweep_metrics["failed_sessions"] = failed_sessions
+    sweep_metrics["checkpoint"]      = args.checkpoint
+    sweep_metrics["eval_dir"]        = args.eval_dir
 
     save_global_metrics(global_metrics, args.output_dir, logger)
+    sweep_path = os.path.join(args.output_dir, "threshold_sweep.json")
+    with open(sweep_path, "w") as f:
+        json.dump(sweep_metrics, f, indent=2, default=float)
+    logger.info("Threshold sweep saved to %s", sweep_path)
 
     # ── final summary ─────────────────────────────────────────────────────
     logger.info("=" * 70)
@@ -906,6 +1040,8 @@ def main():
     logger.info("  Macro BCE Loss     : %.6f",    global_metrics.get("macro_bce_loss", float("nan")))
     logger.info("  Macro Mean F1      : %.4f",    global_metrics.get("macro_mean_f1", float("nan")))
     logger.info("  Macro Mean Acc     : %.4f",    global_metrics.get("macro_mean_accuracy", float("nan")))
+    if len(thresholds) > 1:
+        logger.info("  Best threshold     : %s", sweep_metrics.get("best_threshold", "nan"))
     logger.info("  FA / MISS / CONF   : %d / %d / %d",
                 int(global_metrics.get("total_FA",   0)),
                 int(global_metrics.get("total_MISS", 0)),

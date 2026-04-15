@@ -53,7 +53,8 @@ def train_avsd():
         batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=4,
-        max_speakers=CONFIG["output_speaker"]
+        max_speakers=CONFIG["output_speaker"],
+        max_session_speakers=CONFIG["output_speaker"],
     )
     
     print(f"📊 Starting training with {len(train_loader)} batches per epoch")
