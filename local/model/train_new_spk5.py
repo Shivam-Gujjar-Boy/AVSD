@@ -10,7 +10,7 @@ from dataloader_spk5 import get_dataloader
 from avsd_net_spk5 import AIVECTOR_ConformerVEmbedding_SD_JOINT
 
 SPEAKER_CAP = 5
-CHECKPOINT_DIR = "checkpoints_for_5"
+CHECKPOINT_DIR = "new_checkpoints_for_5"
 
 
 def parse_args():
@@ -19,7 +19,7 @@ def parse_args():
         "--resume",
         type=str,
         default="",
-        help="Checkpoint path to resume from (e.g., checkpoints_for_5/model_epoch_20.pth)",
+        help="Checkpoint path to resume from (e.g., new_checkpoints_for_5/model_epoch_20.pth)",
     )
     parser.add_argument(
         "--epochs",

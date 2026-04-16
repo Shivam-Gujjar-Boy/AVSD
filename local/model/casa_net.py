@@ -68,12 +68,12 @@ class MultiHeadSelfAttention(nn.Module):
         qkv = qkv.reshape(BxN, T, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         Q, K, V = qkv[0], qkv[1], qkv[2]
-        
+
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-        
+
         if mask is not None:
             attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
-        
+
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
         

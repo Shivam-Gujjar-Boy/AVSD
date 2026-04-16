@@ -52,7 +52,7 @@ class visual_encoder(nn.Module):
 
         self.block2 = Visual_Block(32, 64, 5, 3)
         self.pool2 = nn.MaxPool3d(kernel_size=(1, 3, 3), stride=(1, 2, 2), padding=(0, 1, 1))
-        
+
         self.block3 = Visual_Block(64, 128, 5, 3)
 
         self.maxpool = nn.AdaptiveMaxPool2d((1, 1))
@@ -73,7 +73,7 @@ class visual_encoder(nn.Module):
 
         x = self.maxpool(x)
         x = x.view(B, T, C)  
-        
+
         return x
 
     def __init_weight(self):
