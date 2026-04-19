@@ -33,6 +33,7 @@ OUTPUT_BASE="${REPO_ROOT}/evaluation-results-spk5/${RUN_TAG}"
 
 # ── evaluation hyper-parameters ───────────────────────────────────────────
 OUTPUT_SPEAKER=5
+MAX_TRUE_SPEAKERS=5
 CHUNK_FRAMES=200
 STRIDE_FRAMES=200
 THRESHOLDS=(0.01 0.02 0.03 0.04 0.05 0.06 0.07)
@@ -52,6 +53,7 @@ echo "Checkpoint  : ${CHECKPOINT}"
 echo "Eval dir    : ${EVAL_DIR}"
 echo "Output base : ${OUTPUT_BASE}"
 echo "Thresholds  : ${THRESHOLDS[*]}"
+echo "Max speakers: ${MAX_TRUE_SPEAKERS}"
 echo "Mode        : ONE PASS"
 echo "========================================================"
 
@@ -88,6 +90,7 @@ stdbuf -oL -eL python "${MODEL_DIR}/evaluate.py" \
     --chunk_frames "${CHUNK_FRAMES}" \
     --stride_frames "${STRIDE_FRAMES}" \
     --thresholds "${THRESHOLDS[@]}" \
+    --max_true_speakers "${MAX_TRUE_SPEAKERS}" \
     --device "${DEVICE}" \
     --log_level "${LOG_LEVEL}" \
     2>&1 | tee -a "${RUN_LOG}"

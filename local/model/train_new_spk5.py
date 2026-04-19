@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import Adam
 import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import tqdm
@@ -73,7 +74,54 @@ def parse_args():
         action="store_true",
         help="Enable gradients for visual encoder. By default, it is frozen for memory efficiency.",
     )
+    parser.add_argument(
+        "--loss-type",
+        type=str,
+        default="focal",
+        choices=["bce", "focal"],
+        help="Loss type for diarization heads. Use focal for stronger class-imbalance handling.",
+    )
+    parser.add_argument(
+        "--pos-weight",
+        type=float,
+        default=4.0,
+        help="Positive class weight for BCEWithLogits. >1 emphasizes missed speech frames.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Focal loss gamma (hard-example emphasis). Used when --loss-type focal.",
+    )
+    parser.add_argument(
+        "--focal-alpha",
+        type=float,
+        default=0.75,
+        help="Focal alpha for positive class balancing. Used when --loss-type focal.",
+    )
     return parser.parse_args()
+
+
+def compute_speaker_loss(logits: torch.Tensor, targets: torch.Tensor, args) -> torch.Tensor:
+    """Class-imbalance-aware binary loss for one speaker stream."""
+    pos_weight = torch.tensor(args.pos_weight, device=logits.device, dtype=logits.dtype)
+
+    if args.loss_type == "bce":
+        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight)
+
+    bce = F.binary_cross_entropy_with_logits(
+        logits,
+        targets,
+        pos_weight=pos_weight,
+        reduction="none",
+    )
+    prob = torch.sigmoid(logits)
+    p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
+    focal_factor = (1.0 - p_t).pow(args.focal_gamma)
+
+    alpha_pos = args.focal_alpha
+    alpha_t = alpha_pos * targets + (1.0 - alpha_pos) * (1.0 - targets)
+    return (alpha_t * focal_factor * bce).mean()
 
 
 def train_avsd(args):
@@ -124,10 +172,13 @@ def train_avsd(args):
     )
     print(f"🧠 AMP enabled: {use_amp}, dtype: {'bf16' if amp_dtype == torch.bfloat16 else 'fp16'}")
 
-    criterion = nn.BCEWithLogitsLoss()
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
     print(f"📚 Learning rate: {LEARNING_RATE}, scheduler: StepLR(step_size={args.lr_step_size}, gamma={args.lr_gamma})")
+    print(
+        f"🧮 Loss config: type={args.loss_type}, pos_weight={args.pos_weight}, "
+        f"focal_gamma={args.focal_gamma}, focal_alpha={args.focal_alpha}"
+    )
 
     start_epoch = 1
     if args.resume:
@@ -203,7 +254,7 @@ def train_avsd(args):
                         gt_labels = labels[:, :, i].reshape(-1, 1)
                         min_len = min(len(output), len(gt_labels))
                         if min_len > 0:
-                            speaker_loss = criterion(output[:min_len], gt_labels[:min_len])
+                            speaker_loss = compute_speaker_loss(output[:min_len], gt_labels[:min_len], args)
                             batch_loss += speaker_loss
                             valid_speakers += 1
 

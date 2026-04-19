@@ -25,6 +25,10 @@ python train_vsd_spk5.py \
   --grad-accum-steps 1 \
   --lr 1e-4 \
   --weight-decay 1e-4 \
+  --loss-type focal \
+  --pos-weight 4.0 \
+  --focal-gamma 2.0 \
+  --focal-alpha 0.75 \
   --max-speakers 8 \
   --max-session-speakers 5 \
   --checkpoint-dir checkpoints

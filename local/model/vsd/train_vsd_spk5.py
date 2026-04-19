@@ -6,6 +6,7 @@ from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import tqdm
@@ -33,6 +34,31 @@ def parse_args():
     parser.add_argument("--lr-step-size", type=int, default=15, help="StepLR step size")
     parser.add_argument("--lr-gamma", type=float, default=0.5, help="StepLR gamma")
     parser.add_argument("--grad-clip-norm", type=float, default=5.0, help="Grad clip max norm")
+    parser.add_argument(
+        "--loss-type",
+        type=str,
+        default="focal",
+        choices=["bce", "focal"],
+        help="Frame-wise loss: weighted BCE or focal BCE.",
+    )
+    parser.add_argument(
+        "--pos-weight",
+        type=float,
+        default=4.0,
+        help="Positive class weight for BCEWithLogits; >1 emphasizes missed speech frames.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="Focal gamma (hard-example emphasis). Used when --loss-type focal.",
+    )
+    parser.add_argument(
+        "--focal-alpha",
+        type=float,
+        default=0.75,
+        help="Focal alpha for positive class balancing. Used when --loss-type focal.",
+    )
 
     parser.add_argument(
         "--max-speakers",
@@ -75,8 +101,29 @@ def current_lr(optimizer):
     return float(optimizer.param_groups[0]["lr"])
 
 
-def masked_bce_loss(logits, labels, mask, criterion):
-    per_frame = criterion(logits, labels)
+def masked_binary_loss(logits, labels, mask, args):
+    pos_weight = torch.tensor(args.pos_weight, device=logits.device, dtype=logits.dtype)
+
+    if args.loss_type == "bce":
+        per_frame = F.binary_cross_entropy_with_logits(
+            logits,
+            labels,
+            reduction="none",
+            pos_weight=pos_weight,
+        )
+    else:
+        bce = F.binary_cross_entropy_with_logits(
+            logits,
+            labels,
+            reduction="none",
+            pos_weight=pos_weight,
+        )
+        prob = torch.sigmoid(logits)
+        p_t = prob * labels + (1.0 - prob) * (1.0 - labels)
+        focal_factor = (1.0 - p_t).pow(args.focal_gamma)
+        alpha_t = args.focal_alpha * labels + (1.0 - args.focal_alpha) * (1.0 - labels)
+        per_frame = alpha_t * focal_factor * bce
+
     denom = mask.sum().clamp_min(1.0)
     return (per_frame * mask).sum() / denom
 
@@ -95,7 +142,6 @@ def train(args):
     total_params, trainable_params = count_parameters(model)
     logger.info("Model params | total=%d | trainable=%d", total_params, trainable_params)
 
-    criterion = nn.BCEWithLogitsLoss(reduction="none")
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
 
@@ -118,6 +164,13 @@ def train(args):
         args.lr_gamma,
         use_amp,
         "bf16" if amp_dtype == torch.bfloat16 else "fp16",
+    )
+    logger.info(
+        "Loss | type=%s pos_weight=%.3f focal_gamma=%.3f focal_alpha=%.3f",
+        args.loss_type,
+        args.pos_weight,
+        args.focal_gamma,
+        args.focal_alpha,
     )
 
     train_loader = get_dataloader(
@@ -173,7 +226,7 @@ def train(args):
             try:
                 with amp_context:
                     logits = model(video)
-                    loss = masked_bce_loss(logits, labels, mask, criterion)
+                    loss = masked_binary_loss(logits, labels, mask, args)
 
                 if not torch.isfinite(loss):
                     logger.warning("Batch skipped | reason=non_finite_loss | batch=%d", batch_idx)

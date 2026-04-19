@@ -908,6 +908,10 @@ def parse_args():
         help="Only evaluate these session IDs (space-separated). Default: all.",
     )
     p.add_argument(
+        "--max_true_speakers", type=int, default=None,
+        help="If set, skip sessions whose real speaker count exceeds this cap.",
+    )
+    p.add_argument(
         "--log_level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
@@ -932,6 +936,8 @@ def main():
     thresholds = args.thresholds if args.thresholds else [args.threshold]
     logger.info("chunk_frames: %d   stride_frames: %d   thresholds: %s",
                 args.chunk_frames, args.stride_frames, ", ".join(f"{t:.3f}" for t in thresholds))
+    if args.max_true_speakers is not None:
+        logger.info("max_true_speakers filter: <= %d", args.max_true_speakers)
     logger.info("=" * 70)
 
     # ── device ────────────────────────────────────────────────────────────
@@ -960,6 +966,7 @@ def main():
     # ── evaluation loop ───────────────────────────────────────────────────
     session_results: List[Dict] = []
     failed_sessions: List[str]  = []
+    skipped_speaker_cap: List[str] = []
 
     t_start = time.time()
     for idx, session_path in enumerate(tqdm(session_paths, desc="Evaluating", unit="session")):
@@ -976,6 +983,20 @@ def main():
 
         try:
             session = EvalSession(session_path, model_speakers=model_speakers)
+
+            if (
+                args.max_true_speakers is not None
+                and session.n_true_speakers > args.max_true_speakers
+            ):
+                logger.info(
+                    "  [SKIP] %s — n_true_speakers=%d > max_true_speakers=%d",
+                    session_id,
+                    session.n_true_speakers,
+                    args.max_true_speakers,
+                )
+                skipped_speaker_cap.append(session_id)
+                continue
+
             result  = evaluate_session(
                 session, model, model_speakers, device, logger,
                 chunk_frames=args.chunk_frames,
@@ -1013,6 +1034,7 @@ def main():
     global_metrics = aggregate_global_metrics(session_results, threshold_key=primary_threshold_key)
     global_metrics["elapsed_seconds"] = round(elapsed, 2)
     global_metrics["failed_sessions"] = failed_sessions
+    global_metrics["skipped_speaker_cap_sessions"] = skipped_speaker_cap
     global_metrics["checkpoint"]      = args.checkpoint
     global_metrics["eval_dir"]        = args.eval_dir
     global_metrics["threshold"]       = thresholds[0]
@@ -1020,6 +1042,7 @@ def main():
     sweep_metrics = aggregate_threshold_sweep(session_results, thresholds)
     sweep_metrics["elapsed_seconds"] = round(elapsed, 2)
     sweep_metrics["failed_sessions"] = failed_sessions
+    sweep_metrics["skipped_speaker_cap_sessions"] = skipped_speaker_cap
     sweep_metrics["checkpoint"]      = args.checkpoint
     sweep_metrics["eval_dir"]        = args.eval_dir
 
@@ -1035,6 +1058,8 @@ def main():
     logger.info("  Sessions evaluated : %d", len(session_results))
     logger.info("  Sessions failed    : %d  %s",
                 len(failed_sessions), failed_sessions or "")
+    logger.info("  Sessions skipped   : %d  %s",
+                len(skipped_speaker_cap), skipped_speaker_cap or "")
     logger.info("  Global DER         : %.2f %%", global_metrics.get("global_DER", float("nan")))
     logger.info("  Global JER         : %.2f %%", global_metrics.get("global_JER", float("nan")))
     logger.info("  Macro BCE Loss     : %.6f",    global_metrics.get("macro_bce_loss", float("nan")))

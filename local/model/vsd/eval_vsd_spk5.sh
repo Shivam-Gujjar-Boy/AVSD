@@ -57,6 +57,7 @@ echo "Checkpoint  : ${CHECKPOINT}"
 echo "Eval dir    : ${EVAL_DIR}"
 echo "Output dir  : ${OUTPUT_DIR}"
 echo "Thresholds  : ${THRESHOLDS[*]}"
+echo "Max speakers: ${MAX_SESSION_SPEAKERS}"
 echo "========================================================"
 
 if [[ ! -f "${CHECKPOINT}" ]]; then
