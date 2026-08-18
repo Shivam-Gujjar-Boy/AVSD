@@ -4,9 +4,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
-#SBATCH --partition=a40
-#SBATCH --qos=a40
-#SBATCH --time=96:00:00
+#SBATCH --partition=dgx
+#SBATCH --qos=dgx
+#SBATCH --time=48:00:00
 #SBATCH --mem=64G
 #SBATCH --output=vsd5-train-%j.out
 #SBATCH --error=vsd5-train-%j.err

@@ -2,14 +2,14 @@
 #SBATCH --job-name=avsd_eval_spk5
 #SBATCH --output=logs/avsd_eval_spk5_%j.out
 #SBATCH --error=logs/avsd_eval_spk5_%j.err
-#SBATCH --time=96:00:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:1
-#SBATCH --partition=a40
-#SBATCH --qos=a40
+#SBATCH --partition=dgx
+#SBATCH --qos=dgx
 
 set -euo pipefail
 

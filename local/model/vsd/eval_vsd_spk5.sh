@@ -4,9 +4,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
-#SBATCH --partition=a40
-#SBATCH --qos=a40
-#SBATCH --time=48:00:00
+#SBATCH --partition=dgx
+#SBATCH --qos=dgx
+#SBATCH --time=02:00:00
 #SBATCH --mem=64G
 #SBATCH --output=/home/speech-audio-research/22b3965/job_files/vsd5-eval-%j.out
 #SBATCH --error=/home/speech-audio-research/22b3965/job_files/vsd5-eval-%j.err
