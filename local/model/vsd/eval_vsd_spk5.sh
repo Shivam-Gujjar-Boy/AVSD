@@ -2,27 +2,23 @@
 #SBATCH -J vsd5-eval
 #SBATCH -N 1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:1
 #SBATCH --partition=dgx
 #SBATCH --qos=dgx
 #SBATCH --time=02:00:00
-#SBATCH --mem=64G
+#SBATCH --mem=48G
 #SBATCH --output=/home/speech-audio-research/22b3965/job_files/vsd5-eval-%j.out
 #SBATCH --error=/home/speech-audio-research/22b3965/job_files/vsd5-eval-%j.err
 
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: sbatch $0 <checkpoint_path> [eval_dir]"
-  exit 2
-fi
-
-CHECKPOINT="$1"
-EVAL_DIR="${2:-/home/speech-audio-research/22b3965/evaulation-bin/modified-bin}"
-
 REPO_ROOT="/home/speech-audio-research/22b3965"
 VSD_DIR="${REPO_ROOT}/AVSD/local/model/vsd"
+
+# Set default checkpoint to epoch 12 under checkpoints_sem9, allow CLI override if passed
+CHECKPOINT="${1:-${VSD_DIR}/checkpoints_sem9/model_epoch12.pth}"
+EVAL_DIR="${2:-${REPO_ROOT}/evaluation-bin/modified-bin}"
 
 if [[ ! -d "${EVAL_DIR}" ]]; then
   ALT_EVAL_DIR="${REPO_ROOT}/evaluation-bin/modified-bin"
@@ -31,7 +27,7 @@ if [[ ! -d "${EVAL_DIR}" ]]; then
   fi
 fi
 
-RUN_TAG="vsd_epoch_$(date +%Y%m%d_%H%M%S)"
+RUN_TAG="vsd_epoch12_$(date +%Y%m%d_%H%M%S)"
 OUTPUT_DIR="${REPO_ROOT}/evaluation-results-vsd/${RUN_TAG}"
 SUMMARY_TSV="${OUTPUT_DIR}/summary.tsv"
 
@@ -74,6 +70,9 @@ if [[ ! -f "${VSD_DIR}/evaluate_vsd_spk5.py" ]]; then
   echo "ERROR: evaluator script missing: ${VSD_DIR}/evaluate_vsd_spk5.py"
   exit 2
 fi
+
+# Navigate to script directory
+cd "${VSD_DIR}"
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate avsd

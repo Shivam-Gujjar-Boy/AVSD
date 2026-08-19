@@ -101,15 +101,15 @@ class VSDSpeakerChunkDataset(Dataset):
         start_f = sample["start_frame"]
         end_f = sample["end_frame"]
 
-        video = np.load(sample["video_path"])
-        labels = np.load(sample["label_path"])
+        video = np.load(sample["video_path"], mmap_mode="r")
+        labels = np.load(sample["label_path"], mmap_mode="r")
 
-        video_chunk = video[start_f:end_f]
+        video_chunk = np.array(video[start_f:end_f])
 
         if labels.ndim == 1:
-            label_chunk = labels[start_f:end_f]
+            label_chunk = np.array(labels[start_f:end_f])
         elif labels.shape[1] > spk_idx:
-            label_chunk = labels[start_f:end_f, spk_idx]
+            label_chunk = np.array(labels[start_f:end_f, spk_idx])
         else:
             label_chunk = np.zeros(end_f - start_f, dtype=np.float32)
 
@@ -119,8 +119,13 @@ class VSDSpeakerChunkDataset(Dataset):
                 f"Empty chunk after slicing for sample idx={idx}, path={sample['video_path']}"
             )
 
-        video_chunk = video_chunk[:valid_len]
-        label_chunk = label_chunk[:valid_len]
+        video_chunk = video_chunk[:valid_len].astype(np.float32)
+        label_chunk = label_chunk[:valid_len].astype(np.float32)
+
+        if video_chunk.max() > 1.0:
+            video_chunk = video_chunk / 255.0
+
+        video_chunk = np.expand_dims(video_chunk, axis=1)  # Add channel dimension
 
         return {
             "video": torch.as_tensor(video_chunk, dtype=torch.float32),
@@ -134,10 +139,11 @@ def vsd_collate_fn(batch):
     max_len = max(lengths)
 
     batch_size = len(batch)
-    h = int(batch[0]["video"].shape[1])
-    w = int(batch[0]["video"].shape[2])
+    c = int(batch[0]["video"].shape[1])
+    h = int(batch[0]["video"].shape[2])
+    w = int(batch[0]["video"].shape[3])
 
-    videos = torch.zeros((batch_size, max_len, h, w), dtype=torch.float32)
+    videos = torch.zeros((batch_size, max_len, c, h, w), dtype=torch.float32)
     labels = torch.zeros((batch_size, max_len), dtype=torch.float32)
     mask = torch.zeros((batch_size, max_len), dtype=torch.float32)
 

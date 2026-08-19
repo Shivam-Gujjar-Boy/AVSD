@@ -90,7 +90,8 @@ class VSDEvalSession:
             else ""
         )
 
-        self.video_arrays = [np.load(p) for p in self.spk_files]
+        # FIX: Memory-map video arrays to save RAM
+        self.video_arrays = [np.load(p, mmap_mode='r') for p in self.spk_files]
         self.video_lengths = [len(v) for v in self.video_arrays]
         self.video_min_frames = min(self.video_lengths) if self.video_lengths else 0
 
@@ -113,11 +114,6 @@ class VSDEvalSession:
 
     def get_labels_matrix(self) -> np.ndarray:
         labels = np.zeros((self.effective_frames, self.n_true_speakers), dtype=np.float32)
-        # IMPORTANT:
-        # Training CSV stores speaker tracks in slot order (spk0, spk1, ...), where each
-        # slot points to a possibly non-contiguous file name (e.g., spk_1.npy, spk_3.npy).
-        # Labels are aligned to slot order, not necessarily to the numeric suffix in filename.
-        # To match training behavior, evaluation also aligns label columns by local slot index.
         for col_idx, _spk_path in enumerate(self.spk_files):
             if self.labels_raw.shape[1] > col_idx:
                 labels[:, col_idx] = self.labels_raw[: self.effective_frames, col_idx]
@@ -146,11 +142,18 @@ class VSDChunkInferencer:
                 continue
 
             for spk_col, video_array in enumerate(session.video_arrays):
-                chunk = video_array[start:end]
-                video_tensor = torch.as_tensor(chunk, dtype=torch.float32, device=self.device).unsqueeze(0)
+                # FIX: Normalize raw video array chunk to [0.0, 1.0]
+                chunk = video_array[start:end].astype(np.float32)
+                if chunk.max() > 1.0:
+                    chunk = chunk / 255.0
 
+                # FIX: Shape as [B=1, C=1, T, H, W]
+                video_tensor = torch.as_tensor(chunk, device=self.device).unsqueeze(0).unsqueeze(0)
+
+                # FIX: Run with AMP autocast for speed and low memory
                 with torch.no_grad():
-                    logits = self.model(video_tensor)
+                    with torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+                        logits = self.model(video_tensor)
 
                 logits_np = logits.squeeze(0).detach().cpu().numpy()
                 logits_sum[start:end, spk_col] += logits_np
