@@ -159,33 +159,49 @@ class CASA_Decoder(nn.Module):
         ])
         
     def forward(self, x, nframes):
+        """
+        Args:
+            x: [B, T, D, N] fused features from CASA_Module
+            nframes: list of valid frame counts for each batch sample
+        
+        Returns:
+            outputs: [B, T, N] logits for all frames/speakers
+                    Note: Frames beyond nframes[b] are still computed but will be masked in training
+        """
         B, T, D, N = x.shape
         
         if isinstance(nframes, torch.Tensor):
             nframes = list(nframes.detach().cpu().numpy())
         
-        x_flat = x.permute(0, 3, 1, 2).reshape(B*N*T, D)
+        # Reshape: [B, T, D, N] -> [B, N, T, D] -> [B*N*T, D]
+        x_permuted = x.permute(0, 3, 1, 2)  # [B, N, T, D]
+        x_flat = x_permuted.reshape(B * N * T, D)
+        
+        # Pass through hidden layers
         x_flat = self.fc1(x_flat)
         x_flat = self.bn1(x_flat)
         x_flat = self.relu(x_flat)
         x_flat = self.dropout(x_flat)
         
-        valid_indices = []
-        for batch_idx, m in enumerate(nframes):
-            for speaker_idx in range(N):
-                for frame_idx in range(m):
-                    global_idx = batch_idx * N * T + speaker_idx * T + frame_idx
-                    valid_indices.append(global_idx)
+        # Compute logits for each speaker and reorganize to [B, T, N]
+        # Reshape x_flat back: [B*N*T, hidden] -> [B, N, T, hidden]
+        x_reshaped = x_flat.reshape(B, N, T, -1)
         
-        x_valid = x_flat[valid_indices, :]
-        
-        outputs = []
+        outputs_list = []
         for speaker_idx in range(N):
-            speaker_indices = [i for i, idx in enumerate(valid_indices) 
-                             if (idx // T) % N == speaker_idx]
-            speaker_features = x_valid[speaker_indices, :]
-            speaker_out = self.speaker_heads[speaker_idx](speaker_features)
-            outputs.append(speaker_out)
+            # Extract this speaker's features: [B, T, hidden]
+            speaker_features = x_reshaped[:, speaker_idx, :, :]  # [B, T, hidden]
+            speaker_features_flat = speaker_features.reshape(B * T, -1)  # [B*T, hidden]
+            
+            # Get predictions from speaker head: [B*T, 1]
+            speaker_logits = self.speaker_heads[speaker_idx](speaker_features_flat)
+            outputs_list.append(speaker_logits)
+        
+        # Concatenate: [num_speakers] x [B*T, 1] -> [B*T, num_speakers]
+        outputs_flat = torch.cat(outputs_list, dim=1)  # [B*T, num_speakers]
+        
+        # Reshape to [B, T, num_speakers]
+        outputs = outputs_flat.reshape(B, T, N)
         
         return outputs
 

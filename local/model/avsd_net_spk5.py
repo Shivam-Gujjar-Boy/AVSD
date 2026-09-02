@@ -135,13 +135,21 @@ class AIVECTOR_ConformerVEmbedding_SD_JOINT(nn.Module):
 
         print("Model initialization complete!")
 
-    def forward(self, audio_fea, audio_embedding, video_fea, nframes):
-        B, num_speaker, T, H, W = video_fea.shape
+    def forward(self, audio_fea, audio_embedding, video_fea, nframes, mask=None):
+        # Handle new video shape: [B, num_speaker, T, C, H, W]
+        # where C=1 (channel dimension added by new dataloader)
+        B, num_speaker, T, C, H, W = video_fea.shape
 
         if isinstance(nframes, torch.Tensor):
             nframes = list(nframes.detach().cpu().numpy())
 
-        video_fea_reshaped = video_fea.reshape(B*num_speaker, T, H, W)
+        # Reshape for visual encoder: [B*num_speaker, T, C, H, W]
+        # If C=1, we can squeeze or let the encoder handle it
+        if C == 1:
+            # Remove channel dimension before visual encoder: [B*num_speaker, T, H, W]
+            video_fea_reshaped = video_fea.squeeze(3).reshape(B * num_speaker, T, H, W)
+        else:
+            video_fea_reshaped = video_fea.reshape(B * num_speaker, T, C, H, W)
 
         if self.freeze_visual_encoder:
             with torch.no_grad():

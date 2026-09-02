@@ -36,3 +36,4 @@ env/
 local/model/checkpoints/
 exp/
 local/training/training_chunks.csv
+local/model/vsd/session_05_visualized.mp4

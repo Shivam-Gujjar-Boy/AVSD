@@ -102,26 +102,30 @@ def parse_args():
     return parser.parse_args()
 
 
-def compute_speaker_loss(logits: torch.Tensor, targets: torch.Tensor, args) -> torch.Tensor:
-    """Class-imbalance-aware binary loss for one speaker stream."""
+def compute_speaker_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor, args) -> torch.Tensor:
+    """Class-imbalance-aware binary loss for one speaker stream with masking"""
     pos_weight = torch.tensor(args.pos_weight, device=logits.device, dtype=logits.dtype)
 
     if args.loss_type == "bce":
-        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight)
+        per_frame = F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight, reduction="none")
+    else:
+        bce = F.binary_cross_entropy_with_logits(
+            logits,
+            targets,
+            pos_weight=pos_weight,
+            reduction="none",
+        )
+        prob = torch.sigmoid(logits)
+        p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
+        focal_factor = (1.0 - p_t).pow(args.focal_gamma)
 
-    bce = F.binary_cross_entropy_with_logits(
-        logits,
-        targets,
-        pos_weight=pos_weight,
-        reduction="none",
-    )
-    prob = torch.sigmoid(logits)
-    p_t = prob * targets + (1.0 - prob) * (1.0 - targets)
-    focal_factor = (1.0 - p_t).pow(args.focal_gamma)
+        alpha_pos = args.focal_alpha
+        alpha_t = alpha_pos * targets + (1.0 - alpha_pos) * (1.0 - targets)
+        per_frame = alpha_t * focal_factor * bce
 
-    alpha_pos = args.focal_alpha
-    alpha_t = alpha_pos * targets + (1.0 - alpha_pos) * (1.0 - targets)
-    return (alpha_t * focal_factor * bce).mean()
+    # Apply mask to only count valid frames
+    denom = mask.sum().clamp_min(1.0)
+    return (per_frame * mask).sum() / denom
 
 
 def train_avsd(args):
@@ -225,6 +229,7 @@ def train_avsd(args):
             audio = batch['audio'].to(device, non_blocking=True)
             video = batch['video'].to(device, non_blocking=True)
             labels = batch['labels'].to(device, non_blocking=True)
+            mask = batch['mask'].to(device, non_blocking=True)
             nframes = batch['nframes'].tolist()
 
             audio_embed = torch.zeros(
@@ -244,19 +249,32 @@ def train_avsd(args):
 
             try:
                 with amp_context:
-                    outputs = model(audio, audio_embed, video, nframes)
+                    outputs = model(audio, audio_embed, video, nframes, mask=mask)
+                    # outputs: [B, T, num_speakers] logits
+
+                # Reshape for loss computation: [B, T, num_speakers] -> [B*T, num_speakers]
+                batch_size, seq_len, num_speakers = outputs.shape
+                outputs_flat = outputs.reshape(batch_size * seq_len, num_speakers)
+                labels_flat = labels.reshape(batch_size * seq_len, num_speakers)
+                mask_flat = mask.reshape(batch_size * seq_len, 1)
 
                 batch_loss = torch.zeros((), device=device)
                 valid_speakers = 0
 
-                for i, output in enumerate(outputs):
-                    if output is not None and len(output) > 0:
-                        gt_labels = labels[:, :, i].reshape(-1, 1)
-                        min_len = min(len(output), len(gt_labels))
-                        if min_len > 0:
-                            speaker_loss = compute_speaker_loss(output[:min_len], gt_labels[:min_len], args)
-                            batch_loss += speaker_loss
-                            valid_speakers += 1
+                # Compute loss for each speaker
+                for speaker_idx in range(num_speakers):
+                    speaker_logits = outputs_flat[:, speaker_idx]  # [B*T]
+                    speaker_labels = labels_flat[:, speaker_idx]   # [B*T]
+                    speaker_mask = mask_flat[:, 0]                 # [B*T]
+                    
+                    speaker_loss = compute_speaker_loss(
+                        speaker_logits,
+                        speaker_labels,
+                        speaker_mask,
+                        args
+                    )
+                    batch_loss += speaker_loss
+                    valid_speakers += 1
 
                 if valid_speakers > 0:
                     batch_loss = batch_loss / valid_speakers
