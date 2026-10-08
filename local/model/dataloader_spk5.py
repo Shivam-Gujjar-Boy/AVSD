@@ -65,6 +65,7 @@ class AVDiarizationDataset(Dataset):
 
         video_features = []
         diarization_labels = []
+        speaker_mask = []
 
         for i in range(self.max_speakers):
             video_path = row.get(f'spk{i}_video_path', 'MISSING')
@@ -82,6 +83,7 @@ class AVDiarizationDataset(Dataset):
                 # Add channel dimension: [T, H, W] -> [T, 1, H, W]
                 video_chunk = np.expand_dims(video_chunk, axis=1)
                 video_features.append(video_chunk)
+                speaker_mask.append(1.0)
 
                 # Load labels
                 labels = np.load(label_path, mmap_mode='r')
@@ -97,6 +99,7 @@ class AVDiarizationDataset(Dataset):
                 dummy_frames = np.zeros((end_f - start_f, 1, 96, 96), dtype=np.float32)
                 video_features.append(dummy_frames)
                 diarization_labels.append(np.zeros(end_f - start_f, dtype=np.float32))
+                speaker_mask.append(0.0)
 
         # Convert to tensors
         # audio: [T, 40]
@@ -112,6 +115,7 @@ class AVDiarizationDataset(Dataset):
             'audio': audio_tensor,
             'video': video_tensor,
             'labels': labels_tensor,
+            'speaker_mask': torch.tensor(speaker_mask, dtype=torch.float32),
             'nframes': torch.tensor(end_f - start_f, dtype=torch.long)
         }
 
@@ -136,6 +140,7 @@ def avsd_collate_fn(batch):
     videos = torch.zeros((batch_size, num_speakers, max_len, c, h, w), dtype=torch.float32)
     labels = torch.zeros((batch_size, max_len, num_speakers), dtype=torch.float32)
     mask = torch.zeros((batch_size, max_len), dtype=torch.float32)
+    speaker_masks = torch.zeros((batch_size, num_speakers), dtype=torch.float32)
 
     # Fill tensors
     for i, item in enumerate(batch):
@@ -144,12 +149,14 @@ def avsd_collate_fn(batch):
         videos[i, :, :cur_len, :, :, :] = item['video']
         labels[i, :cur_len, :] = item['labels']
         mask[i, :cur_len] = 1.0
+        speaker_masks[i] = item['speaker_mask']
 
     return {
         'audio': audios,
         'video': videos,
         'labels': labels,
         'mask': mask,
+        'speaker_mask': speaker_masks,
         'nframes': torch.tensor(lengths, dtype=torch.long),
     }
 

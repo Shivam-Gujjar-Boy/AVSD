@@ -11,7 +11,7 @@ from dataloader_spk5 import get_dataloader
 from avsd_net_spk5 import AIVECTOR_ConformerVEmbedding_SD_JOINT
 
 SPEAKER_CAP = 5
-CHECKPOINT_DIR = "new_checkpoints_for_5"
+CHECKPOINT_DIR = "checkpoints_spk5_sem9_eqweights"
 
 
 def parse_args():
@@ -20,7 +20,7 @@ def parse_args():
         "--resume",
         type=str,
         default="",
-        help="Checkpoint path to resume from (e.g., new_checkpoints_for_5/model_epoch_20.pth)",
+        help="Checkpoint path to resume from (e.g., checkpoints_spk5_sem9/model_epoch_20.pth)",
     )
     parser.add_argument(
         "--epochs",
@@ -177,8 +177,13 @@ def train_avsd(args):
     print(f"🧠 AMP enabled: {use_amp}, dtype: {'bf16' if amp_dtype == torch.bfloat16 else 'fp16'}")
 
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
-    print(f"📚 Learning rate: {LEARNING_RATE}, scheduler: StepLR(step_size={args.lr_step_size}, gamma={args.lr_gamma})")
+    scheduler = lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+	mode='min',
+	factor=args.lr_gamma,
+	patience=args.lr_step_size
+    )
+    print(f"📚 Learning rate: {LEARNING_RATE}, scheduler: ReduceLROnPlateau(patience={args.lr_step_size}, gamma={args.lr_gamma})")
     print(
         f"🧮 Loss config: type={args.loss_type}, pos_weight={args.pos_weight}, "
         f"focal_gamma={args.focal_gamma}, focal_alpha={args.focal_alpha}"
@@ -230,6 +235,7 @@ def train_avsd(args):
             video = batch['video'].to(device, non_blocking=True)
             labels = batch['labels'].to(device, non_blocking=True)
             mask = batch['mask'].to(device, non_blocking=True)
+            speaker_mask = batch['speaker_mask'].to(device, non_blocking=True)
             nframes = batch['nframes'].tolist()
 
             audio_embed = torch.zeros(
@@ -249,7 +255,7 @@ def train_avsd(args):
 
             try:
                 with amp_context:
-                    outputs = model(audio, audio_embed, video, nframes, mask=mask)
+                    outputs = model(audio, audio_embed, video, nframes, mask=mask, speaker_mask=speaker_mask)
                     # outputs: [B, T, num_speakers] logits
 
                 # Reshape for loss computation: [B, T, num_speakers] -> [B*T, num_speakers]
@@ -257,6 +263,9 @@ def train_avsd(args):
                 outputs_flat = outputs.reshape(batch_size * seq_len, num_speakers)
                 labels_flat = labels.reshape(batch_size * seq_len, num_speakers)
                 mask_flat = mask.reshape(batch_size * seq_len, 1)
+                speaker_mask_flat = speaker_mask[:, None, :].expand(
+                    batch_size, seq_len, num_speakers
+                ).reshape(batch_size * seq_len, num_speakers)
 
                 batch_loss = torch.zeros((), device=device)
                 valid_speakers = 0
@@ -265,16 +274,26 @@ def train_avsd(args):
                 for speaker_idx in range(num_speakers):
                     speaker_logits = outputs_flat[:, speaker_idx]  # [B*T]
                     speaker_labels = labels_flat[:, speaker_idx]   # [B*T]
-                    speaker_mask = mask_flat[:, 0]                 # [B*T]
+                    loss_mask = mask_flat[:, 0] * speaker_mask_flat[:, speaker_idx]
+
+                    if loss_mask.sum() > 0:
+                        speaker_loss = compute_speaker_loss(
+                            speaker_logits,
+                            speaker_labels,
+                            loss_mask,
+                            args
+                        )
+                        batch_loss += speaker_loss
+                        valid_speakers += 1
                     
-                    speaker_loss = compute_speaker_loss(
-                        speaker_logits,
-                        speaker_labels,
-                        speaker_mask,
-                        args
-                    )
-                    batch_loss += speaker_loss
-                    valid_speakers += 1
+                    # speaker_loss = compute_speaker_loss(
+                    #     speaker_logits,
+                    #     speaker_labels,
+                    #     loss_mask,
+                    #     args
+                    # )
+                    # batch_loss += speaker_loss
+                    # valid_speakers += 1
 
                 if valid_speakers > 0:
                     batch_loss = batch_loss / valid_speakers
@@ -318,7 +337,7 @@ def train_avsd(args):
         avg_epoch_loss = epoch_loss / batch_count if batch_count > 0 else 0
         print(f'📈 Epoch {epoch+1}/{NUM_EPOCHS}, Average Loss: {avg_epoch_loss:.4f}')
 
-        scheduler.step()
+        scheduler.step(avg_epoch_loss)
 
         checkpoint_path = os.path.join(CHECKPOINT_DIR, f'model_epoch_{epoch+1}.pth')
         torch.save({

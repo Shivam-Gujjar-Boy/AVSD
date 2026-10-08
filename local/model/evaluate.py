@@ -14,7 +14,7 @@ Evaluation dataset structure (one directory per session):
                 spk_1.npy
                 ...
 
-Model was trained with output_speaker=4.  Sessions with a different number of
+Model was trained with output_speaker=5.  Sessions with a different number of
 speakers are handled as follows:
   - N <  MODEL_SPEAKERS : padded with zero video frames; extra heads are masked.
   - N == MODEL_SPEAKERS : standard inference.
@@ -49,7 +49,7 @@ from tqdm import tqdm
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
-from avsd_net import AIVECTOR_ConformerVEmbedding_SD_JOINT  # noqa: E402
+from avsd_net_spk5 import AIVECTOR_ConformerVEmbedding_SD_JOINT  # noqa: E402
 
 # ════════════════════════════════════════════════════════════════════════════
 # DEFAULT CONFIGURATION  (all overridable via CLI args)
@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     "input_dim": 40,
     "average_pooling": 3,
     "speaker_embedding_dim": 100,
-    "output_speaker": 4,          # must match the trained checkpoint
+    "output_speaker": 5,          # must match the trained checkpoint
     "audio_output_dim": 256,
     "video_embedding_dim": 256,
     "num_attention_heads": 4,
@@ -320,7 +320,7 @@ def load_model(
 def _run_inference_pass(
     model: nn.Module,
     audio_tensor: torch.Tensor,         # (1, 40, T)
-    video_np: np.ndarray,               # (K, T, 96, 96)  K <= model_speakers
+    video_np: np.ndarray,               # (K, T, H, W)  K <= model_speakers
     nframes: int,
     model_speakers: int,
     device: torch.device,
@@ -341,7 +341,8 @@ def _run_inference_pass(
     # shape, so a mismatch causes a reshape RuntimeError.
     audio_sliced = audio_tensor[:, :, :nframes]   # (1, 40, nframes)
 
-    # Pad video speakers to model_speakers
+    # Pad video speakers to model_speakers. The current AVSD model expects
+    # [B, N, T, C, H, W], with a single grayscale channel.
     nframes_vid = video_np.shape[1]   # should equal nframes after iter_chunks fix
     H = video_np.shape[2] if video_np.ndim >= 3 else 96
     W = video_np.shape[3] if video_np.ndim >= 4 else H
@@ -351,7 +352,8 @@ def _run_inference_pass(
         )
         video_np = np.concatenate([video_np, pad], axis=0)
 
-    video_tensor = torch.FloatTensor(video_np).unsqueeze(0).to(device)  # (1, model_speakers, nframes, H, W)
+    video_tensor = torch.FloatTensor(video_np).unsqueeze(2).unsqueeze(0).to(device)
+    # (1, model_speakers, nframes, 1, H, W)
     audio_embed  = torch.zeros(1, model_speakers, 100, device=device)
 
     # CRITICAL: patch num_speakers in the visual encoder wrapper so that the
@@ -360,24 +362,34 @@ def _run_inference_pass(
     original_ns = getattr(v_embedding_wrapper, "num_speakers", None)
     setattr(v_embedding_wrapper, "num_speakers", model_speakers)
 
+    mask = torch.ones((1, nframes), dtype=torch.float32, device=device)  # (1, T)
+
+    speaker_mask = torch.zeros((1, model_speakers), dtype=torch.float32, device=device)  # (1, N)
+
     with torch.no_grad():
-        outputs = model(audio_sliced, audio_embed, video_tensor, [nframes])
+        outputs = model(
+            audio_sliced,
+            audio_embed,
+            video_tensor,
+            [nframes],
+            mask=mask,
+            speaker_mask=speaker_mask
+        )
 
     if original_ns is not None:
         setattr(v_embedding_wrapper, "num_speakers", original_ns)  # restore
 
-    # outputs is a list of len model_speakers, each element shape: (sum_valid_frames_across_batch, 1)
-    # For batch_size=1, each element has shape (nframes, 1)
-    # We only care about the first K speakers (real speakers)
-    logit_list = []
-    for spk_idx in range(K):
-        spk_logits = outputs[spk_idx]           # (nframes, 1)
-        if spk_logits is not None and len(spk_logits) > 0:
-            logit_list.append(spk_logits.squeeze(-1).cpu().numpy())  # (nframes,)
-        else:
-            logit_list.append(np.full(nframes, -10.0, dtype=np.float32))
+    # Current CASA_Decoder output is [B, T, model_speakers].
+    if not isinstance(outputs, torch.Tensor) or outputs.ndim != 3:
+        raise TypeError(
+            f"Expected AVSD model output [B, T, N] tensor, got {type(outputs).__name__}"
+        )
+    if outputs.shape[0] != 1 or outputs.shape[1] != nframes:
+        raise RuntimeError(
+            f"Unexpected AVSD output shape {tuple(outputs.shape)} for nframes={nframes}"
+        )
 
-    return np.stack(logit_list, axis=1)          # (nframes, K)
+    return outputs[0, :, :K].detach().cpu().numpy().astype(np.float32)
 
 
 def infer_session_chunk(

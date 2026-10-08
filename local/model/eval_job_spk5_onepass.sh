@@ -13,11 +13,15 @@
 
 set -euo pipefail
 
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate avsd
+
 REPO_ROOT="/home/speech-audio-research/22b3965"
 MODEL_DIR="${REPO_ROOT}/AVSD/local/model"
 
 # ── user-configurable paths ───────────────────────────────────────────────
-CHECKPOINT="${REPO_ROOT}/AVSD/local/model/checkpoints_for_5/model_epoch_100.pth"
+# train_new_spk5.py writes checkpoints relative to MODEL_DIR.
+CHECKPOINT="${MODEL_DIR}/new_checkpoints_for_5/model_epoch_100.pth"
 
 # Prefer correctly spelled path; fallback to legacy misspelled path.
 EVAL_DIR="${REPO_ROOT}/evaluation-bin/modified-bin"
@@ -61,6 +65,11 @@ mkdir -p logs "${OUTPUT_BASE}"
 
 if [[ ! -f "${MODEL_DIR}/evaluate.py" ]]; then
     echo "ERROR: evaluate.py not found at ${MODEL_DIR}/evaluate.py"
+    exit 2
+fi
+
+if ! python -c "import scipy, torch, tqdm"; then
+    echo "ERROR: the avsd environment is missing an evaluation dependency"
     exit 2
 fi
 

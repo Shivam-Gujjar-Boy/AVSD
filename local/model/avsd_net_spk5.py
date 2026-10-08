@@ -96,7 +96,7 @@ class AIVECTOR_CASA_SD(nn.Module):
             dropout=configs.get("dropout", 0.1)
         )
 
-    def forward(self, x, audio_embedding, video_embedding, nframes):
+    def forward(self, x, audio_embedding, video_embedding, nframes, mask=None, speaker_mask=None):
         batchsize, Freq, Time = x.shape
         N = audio_embedding.shape[1]
 
@@ -115,7 +115,14 @@ class AIVECTOR_CASA_SD(nn.Module):
         speaker_embeddings = torch.zeros_like(audio_embedding.unsqueeze(1).expand(-1, Time, -1, -1))
         speaker_embeddings = speaker_embeddings.permute(0, 1, 3, 2)
 
-        outputs = self.casa_net(audio_features, video_features, speaker_embeddings, nframes)
+        attn_mask = None
+        if mask is not None and speaker_mask is not None:
+            B, T = mask.shape
+            N = speaker_mask.shape[1]
+            combined_mask = mask.unsqueeze(1) * speaker_mask.unsqueeze(2)
+            attn_mask = combined_mask.view(B*N, T)
+
+        outputs = self.casa_net(audio_features, video_features, speaker_embeddings, nframes, mask=attn_mask)
 
         return outputs
 
@@ -135,7 +142,7 @@ class AIVECTOR_ConformerVEmbedding_SD_JOINT(nn.Module):
 
         print("Model initialization complete!")
 
-    def forward(self, audio_fea, audio_embedding, video_fea, nframes, mask=None):
+    def forward(self, audio_fea, audio_embedding, video_fea, nframes, mask=None, speaker_mask=None):
         # Handle new video shape: [B, num_speaker, T, C, H, W]
         # where C=1 (channel dimension added by new dataloader)
         B, num_speaker, T, C, H, W = video_fea.shape
@@ -159,6 +166,6 @@ class AIVECTOR_ConformerVEmbedding_SD_JOINT(nn.Module):
 
         v_embedding = v_embedding.reshape(B, num_speaker, T, -1)
 
-        av_outputs = self.av_sd(audio_fea, audio_embedding, v_embedding, nframes)
+        av_outputs = self.av_sd(audio_fea, audio_embedding, v_embedding, nframes, mask=mask, speaker_mask=speaker_mask)
 
         return av_outputs

@@ -1,40 +1,43 @@
 #!/bin/bash
 #SBATCH --job-name=avsd_eval
-#SBATCH --output=logs/avsd_eval_%j.out
-#SBATCH --error=logs/avsd_eval_%j.err
-#SBATCH --time=48:00:00
+#SBATCH --output=logs/avsd_eval_october_%j.out
+#SBATCH --error=logs/avsd_eval_october_%j.err
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=48G
 #SBATCH --gres=gpu:1
 #SBATCH --partition=a40
 #SBATCH --qos=a40
 
 set -euo pipefail
 
-REPO_ROOT="/home/speech-audio-research/22b3965"   # one level up from local/
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate avsd
+
+REPO_ROOT="/home/speech-audio-research/22b3965"
 MODEL_DIR="${REPO_ROOT}/AVSD/local/model"
 
 # ── user-configurable paths ───────────────────────────────────────────────
-CHECKPOINT="${REPO_ROOT}/AVSD/local/model/checkpoints/model_epoch_20.pth"
+CHECKPOINT="${MODEL_DIR}/checkpoints_spk5_sem9/model_epoch_40.pth"
 # Prefer correctly spelled path; fallback to legacy misspelled path.
-EVAL_DIR="${REPO_ROOT}/evaluation-bin/modified-bin"
+EVAL_DIR="${REPO_ROOT}/evaulation-bin/modified-bin"
 if [[ ! -d "${EVAL_DIR}" ]]; then
     LEGACY_EVAL_DIR="${REPO_ROOT}/evaulation-bin/modified-bin"
     if [[ -d "${LEGACY_EVAL_DIR}" ]]; then
         EVAL_DIR="${LEGACY_EVAL_DIR}"
     fi
 fi
-RUN_TAG="epoch_20_$(date +%Y%m%d_%H%M%S)"
-OUTPUT_BASE="${REPO_ROOT}/evaluation-results/${RUN_TAG}"
+RUN_TAG="epoch_40_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_BASE="${REPO_ROOT}/evaluation-results-october/${RUN_TAG}"
 
 # ── evaluation hyper-parameters ───────────────────────────────────────────
-OUTPUT_SPEAKER=4        # must match the trained model (change if you retrained for more)
+OUTPUT_SPEAKER=5        # matches train_new_spk5.py and avsd_net_spk5.py
 CHUNK_FRAMES=200        # 8 s @ 25 fps
 STRIDE_FRAMES=200       # non-overlapping (set smaller for overlapping eval)
 # Sweep thresholds (edit this list as needed)
-THRESHOLDS=(0.15 0.20 0.25 0.30 0.35 0.40 0.50)
+THRESHOLDS=(0.15 0.20 0.25 0.30 0.35 0.40 0.50 0.55 0.60 0.65 0.70 0.75)
 DEVICE="cuda"           # force GPU for faster evaluation
 LOG_LEVEL="INFO"
 
@@ -65,6 +68,11 @@ mkdir -p logs "${OUTPUT_BASE}"
 # ── early sanity checks (fail once, fast) ─────────────────────────────────
 if [[ ! -f "${MODEL_DIR}/evaluate.py" ]]; then
     echo "ERROR: evaluate.py not found at ${MODEL_DIR}/evaluate.py"
+    exit 2
+fi
+
+if ! python -c "import scipy, torch, tqdm"; then
+    echo "ERROR: the avsd environment is missing an evaluation dependency"
     exit 2
 fi
 

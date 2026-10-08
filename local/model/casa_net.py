@@ -36,7 +36,8 @@ class MultiHeadCrossAttention(nn.Module):
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
         
         if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
+            mask_expanded = mask.view(BxN, 1, 1, T)
+            attn_scores = attn_scores.masked_fill(mask_expanded == 0, -1e9)
         
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
@@ -72,7 +73,8 @@ class MultiHeadSelfAttention(nn.Module):
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
 
         if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask == 0, float('-inf'))
+            mask_expanded = mask.view(BxN, 1, 1, T)
+            attn_scores = attn_scores.masked_fill(mask_expanded == 0, -1e9)
 
         attn_weights = F.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
@@ -119,7 +121,7 @@ class CASA_Module(nn.Module):
         
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, audio_features, video_features, speaker_embeddings):
+    def forward(self, audio_features, video_features, speaker_embeddings, mask=None):
         B, T, D_A, N = audio_features.shape
         _, _, D_V, _ = video_features.shape
         
@@ -129,14 +131,14 @@ class CASA_Module(nn.Module):
         F_a_reshaped = F_a.permute(0, 3, 1, 2).reshape(B*N, T, self.dim_audio_combined)
         F_v_reshaped = video_features.permute(0, 3, 1, 2).reshape(B*N, T, D_V)
         
-        F_a2v = self.cross_attn_a2v(query=F_v_reshaped, key=F_a_reshaped, value=F_a_reshaped)
+        F_a2v = self.cross_attn_a2v(query=F_v_reshaped, key=F_a_reshaped, value=F_a_reshaped, mask=mask)
         F_a2v = self.norm_a2v(F_v_reshaped + self.dropout(F_a2v))
         
-        F_v2a = self.cross_attn_v2a(query=F_a_reshaped, key=F_v_reshaped, value=F_v_reshaped)
+        F_v2a = self.cross_attn_v2a(query=F_a_reshaped, key=F_v_reshaped, value=F_v_reshaped, mask=mask)
         F_v2a = self.norm_v2a(F_a_reshaped + self.dropout(F_v2a))
         
         F_concat = torch.cat([F_a2v, F_v2a], dim=-1)
-        F_sa = self.self_attn(F_concat)
+        F_sa = self.self_attn(F_concat, mask=mask)
         F_out = self.norm_sa(F_concat + self.dropout(F_sa))
         
         F_out = F_out.reshape(B, N, T, -1).permute(0, 2, 3, 1)
@@ -228,7 +230,7 @@ class CASA_Net_AVSD(nn.Module):
             dropout=dropout
         )
         
-    def forward(self, audio_features, video_features, speaker_embeddings, nframes):
-        fused_features = self.casa_module(audio_features, video_features, speaker_embeddings)
+    def forward(self, audio_features, video_features, speaker_embeddings, nframes, mask=None):
+        fused_features = self.casa_module(audio_features, video_features, speaker_embeddings, mask=mask)
         outputs = self.decoder(fused_features, nframes)
         return outputs
