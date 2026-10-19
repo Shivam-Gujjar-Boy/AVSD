@@ -6,12 +6,44 @@ import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import tqdm
 import os
 import argparse
+import logging
+import time
 from contextlib import nullcontext
+from datetime import datetime
 from dataloader_spk5 import get_dataloader
 from avsd_net_spk5 import AIVECTOR_ConformerVEmbedding_SD_JOINT
 
 SPEAKER_CAP = 5
 CHECKPOINT_DIR = "checkpoints_spk5_sem9_eqweights"
+LOG_DIR = "logs_spk5"
+
+
+def configure_logger() -> tuple[logging.Logger, str]:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(LOG_DIR, f"training_{run_id}.log")
+
+    logger = logging.getLogger("avsd.train_spk5")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    return logger, log_path
 
 
 def parse_args():
@@ -129,6 +161,9 @@ def compute_speaker_loss(logits: torch.Tensor, targets: torch.Tensor, mask: torc
 
 
 def train_avsd(args):
+    logger, log_path = configure_logger()
+    run_start_time = time.perf_counter()
+
     CONFIG = {
         "input_dim": 40,
         "average_pooling": 3,
@@ -155,14 +190,26 @@ def train_avsd(args):
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🚀 Using device: {device}")
+    logger.info("Training run started; log_file=%s", os.path.abspath(log_path))
+    logger.info("Using device: %s", device)
+    if device.type == "cuda":
+        logger.info("CUDA device: %s", torch.cuda.get_device_name(device))
+        logger.info("CUDA memory: total=%.2f GiB", torch.cuda.get_device_properties(device).total_memory / 2**30)
 
-    print("🔄 Initializing model...")
+    logger.info("Initializing model")
     model = AIVECTOR_ConformerVEmbedding_SD_JOINT(
         CONFIG,
         freeze_visual_encoder=(not args.train_visual_encoder),
     )
     model = model.to(device)
+    trainable_parameters = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    total_parameters = sum(parameter.numel() for parameter in model.parameters())
+    logger.info(
+        "Model initialized; total_parameters=%d trainable_parameters=%d visual_encoder_frozen=%s",
+        total_parameters,
+        trainable_parameters,
+        not args.train_visual_encoder,
+    )
 
     use_amp = (device.type == "cuda") and (not args.disable_amp)
     amp_mod = getattr(torch, "amp", None)
@@ -174,7 +221,11 @@ def train_avsd(args):
         if amp_grad_scaler_ctor is not None
         else torch.cuda.amp.GradScaler(enabled=(use_amp and amp_dtype == torch.float16))
     )
-    print(f"🧠 AMP enabled: {use_amp}, dtype: {'bf16' if amp_dtype == torch.bfloat16 else 'fp16'}")
+    logger.info(
+        "AMP enabled=%s dtype=%s",
+        use_amp,
+        "bf16" if amp_dtype == torch.bfloat16 else "fp16",
+    )
 
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = lr_scheduler.ReduceLROnPlateau(
@@ -183,10 +234,29 @@ def train_avsd(args):
 	factor=args.lr_gamma,
 	patience=args.lr_step_size
     )
-    print(f"📚 Learning rate: {LEARNING_RATE}, scheduler: ReduceLROnPlateau(patience={args.lr_step_size}, gamma={args.lr_gamma})")
-    print(
-        f"🧮 Loss config: type={args.loss_type}, pos_weight={args.pos_weight}, "
-        f"focal_gamma={args.focal_gamma}, focal_alpha={args.focal_alpha}"
+    logger.info(
+        "Optimizer=Adam learning_rate=%s scheduler=ReduceLROnPlateau(patience=%s, gamma=%s)",
+        LEARNING_RATE,
+        args.lr_step_size,
+        args.lr_gamma,
+    )
+    logger.info(
+        "Loss configuration: type=%s pos_weight=%s focal_gamma=%s focal_alpha=%s",
+        args.loss_type,
+        args.pos_weight,
+        args.focal_gamma,
+        args.focal_alpha,
+    )
+    logger.info(
+        "Run configuration: epochs=%d batch_size=%d num_workers=%d grad_accum_steps=%d "
+        "train_visual_encoder=%s disable_amp=%s csv_path=%s",
+        NUM_EPOCHS,
+        BATCH_SIZE,
+        args.num_workers,
+        args.grad_accum_steps,
+        args.train_visual_encoder,
+        args.disable_amp,
+        CSV_PATH,
     )
 
     start_epoch = 1
@@ -194,7 +264,7 @@ def train_avsd(args):
         if not os.path.isfile(args.resume):
             raise FileNotFoundError(f"Resume checkpoint not found: {args.resume}")
 
-        print(f"🔄 Resuming from checkpoint: {args.resume}")
+        logger.info("Resuming from checkpoint: %s", args.resume)
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -205,9 +275,9 @@ def train_avsd(args):
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        print(f"✅ Resume successful. Starting from epoch {start_epoch}/{NUM_EPOCHS}")
+        logger.info("Resume successful; starting_epoch=%d total_epochs=%d", start_epoch, NUM_EPOCHS)
 
-    print("🔄 Loading data...")
+    logger.info("Loading data")
     train_loader = get_dataloader(
         csv_path=CSV_PATH,
         batch_size=BATCH_SIZE,
@@ -217,19 +287,24 @@ def train_avsd(args):
         max_session_speakers=CONFIG["output_speaker"],
     )
 
-    print(f"📊 Starting training with {len(train_loader)} batches per epoch")
+    logger.info("Data loaded; batches_per_epoch=%d", len(train_loader))
 
     for epoch in range(start_epoch - 1, NUM_EPOCHS):
+        epoch_start_time = time.perf_counter()
         model.train()
         if not args.train_visual_encoder:
             model.v_embedding.eval()
         epoch_loss = 0
         batch_count = 0
+        skipped_batches = 0
+        optimizer_steps = 0
         optimizer.zero_grad(set_to_none=True)
 
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{NUM_EPOCHS}')
+        logger.info("Epoch %d/%d started; learning_rate=%s", epoch + 1, NUM_EPOCHS, optimizer.param_groups[0]["lr"])
 
         for batch_idx, batch in enumerate(progress_bar):
+            batch_start_time = time.perf_counter()
             batch_loss_value = None
             audio = batch['audio'].to(device, non_blocking=True)
             video = batch['video'].to(device, non_blocking=True)
@@ -298,7 +373,13 @@ def train_avsd(args):
                 if valid_speakers > 0:
                     batch_loss = batch_loss / valid_speakers
                     if not torch.isfinite(batch_loss):
-                        print(f"⚠️ Non-finite loss at batch {batch_idx + 1}, skipping optimizer step")
+                        skipped_batches += 1
+                        logger.warning(
+                            "Non-finite loss; epoch=%d batch=%d/%d skipping optimizer step",
+                            epoch + 1,
+                            batch_idx + 1,
+                            len(train_loader),
+                        )
                         optimizer.zero_grad(set_to_none=True)
                         continue
 
@@ -317,16 +398,44 @@ def train_avsd(args):
                         else:
                             optimizer.step()
                         optimizer.zero_grad(set_to_none=True)
+                        optimizer_steps += 1
 
                     epoch_loss += batch_loss_value
                     batch_count += 1
+                    logger.debug(
+                        "Batch completed; epoch=%d batch=%d/%d loss=%.6f running_avg=%.6f "
+                        "valid_speakers=%d optimizer_steps=%d duration_seconds=%.3f",
+                        epoch + 1,
+                        batch_idx + 1,
+                        len(train_loader),
+                        batch_loss_value,
+                        epoch_loss / batch_count,
+                        valid_speakers,
+                        optimizer_steps,
+                        time.perf_counter() - batch_start_time,
+                    )
+                else:
+                    skipped_batches += 1
+                    logger.warning(
+                        "No valid speakers; epoch=%d batch=%d/%d skipped",
+                        epoch + 1,
+                        batch_idx + 1,
+                        len(train_loader),
+                    )
 
             except RuntimeError as e:
                 if "out of memory" in str(e).lower() and device.type == "cuda":
-                    print(f"⚠️ OOM at batch {batch_idx + 1}, skipping batch and clearing cache")
+                    skipped_batches += 1
+                    logger.warning(
+                        "CUDA OOM; epoch=%d batch=%d/%d skipping batch and clearing cache",
+                        epoch + 1,
+                        batch_idx + 1,
+                        len(train_loader),
+                    )
                     optimizer.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
                     continue
+                logger.exception("RuntimeError at epoch=%d batch=%d", epoch + 1, batch_idx + 1)
                 raise
 
             progress_bar.set_postfix({
@@ -335,9 +444,24 @@ def train_avsd(args):
             })
 
         avg_epoch_loss = epoch_loss / batch_count if batch_count > 0 else 0
-        print(f'📈 Epoch {epoch+1}/{NUM_EPOCHS}, Average Loss: {avg_epoch_loss:.4f}')
+        learning_rate_before_scheduler = optimizer.param_groups[0]["lr"]
 
         scheduler.step(avg_epoch_loss)
+        learning_rate_after_scheduler = optimizer.param_groups[0]["lr"]
+        epoch_duration = time.perf_counter() - epoch_start_time
+        logger.info(
+            "Epoch %d/%d completed; average_loss=%.6f processed_batches=%d skipped_batches=%d "
+            "optimizer_steps=%d learning_rate_before=%s learning_rate_after=%s duration_seconds=%.2f",
+            epoch + 1,
+            NUM_EPOCHS,
+            avg_epoch_loss,
+            batch_count,
+            skipped_batches,
+            optimizer_steps,
+            learning_rate_before_scheduler,
+            learning_rate_after_scheduler,
+            epoch_duration,
+        )
 
         checkpoint_path = os.path.join(CHECKPOINT_DIR, f'model_epoch_{epoch+1}.pth')
         torch.save({
@@ -348,9 +472,9 @@ def train_avsd(args):
             'loss': avg_epoch_loss,
             'config': CONFIG
         }, checkpoint_path)
-        print(f'💾 Checkpoint saved: {checkpoint_path}')
+        logger.info("Checkpoint saved: %s", os.path.abspath(checkpoint_path))
 
-    print("✅ Training completed!")
+    logger.info("Training completed successfully; total_duration_seconds=%.2f", time.perf_counter() - run_start_time)
 
 
 if __name__ == "__main__":
