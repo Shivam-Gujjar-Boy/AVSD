@@ -139,7 +139,14 @@ class EvalSession:
         # different rates.  We record each speaker's actual length and clamp
         # iteration to the minimum across all modalities so the model always
         # receives tensors with the same temporal dimension.
-        self.video_features: List[np.ndarray] = [np.load(p) for p in spk_files]
+        # Scale video to [0, 1] exactly like training (dataloader_spk5.load_video_scaled).
+        # Previously raw 0-255 pixels were fed to a model trained on [0, 1] inputs.
+        self.video_features: List[np.ndarray] = []
+        for p in spk_files:
+            vf = np.load(p).astype(np.float32)
+            if vf.size and vf.max() > 1.0:
+                vf /= 255.0
+            self.video_features.append(vf)
 
         # Detect per-speaker video lengths and log any mismatch.
         video_lengths = [len(vf) for vf in self.video_features]
@@ -365,6 +372,7 @@ def _run_inference_pass(
     mask = torch.ones((1, nframes), dtype=torch.float32, device=device)  # (1, T)
 
     speaker_mask = torch.zeros((1, model_speakers), dtype=torch.float32, device=device)  # (1, N)
+    speaker_mask[0, :K] = 1.0  # the first K slots are real speakers; the rest are padding
 
     with torch.no_grad():
         outputs = model(

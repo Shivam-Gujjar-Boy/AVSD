@@ -23,18 +23,18 @@ class Visual_Block(nn.Module):
             self.s_1 = nn.Conv3d(in_channels, out_channels//2, kernel_size=(1, kernel_1, kernel_1), 
                                padding=(0, self.padding_1, self.padding_1), bias=False)
         
-        self.s_norm_1 = nn.BatchNorm3d(out_channels//2, momentum=0.01, eps=0.001)
+        self.s_norm_1 = nn.BatchNorm3d(out_channels//2, momentum=0.1, eps=0.001)
         
         self.s_2 = nn.Conv3d(out_channels//2, out_channels, kernel_size=(1, kernel_2, kernel_2), 
                             padding=(0, self.padding_2, self.padding_2), bias=False)
-        self.s_norm_2 = nn.BatchNorm3d(out_channels, momentum=0.01, eps=0.001)
+        self.s_norm_2 = nn.BatchNorm3d(out_channels, momentum=0.1, eps=0.001)
 
         self.t_1 = nn.Conv3d(out_channels, out_channels, kernel_size=(kernel_1, 1, 1), 
                            padding=(self.padding_1, 0, 0), bias=False)
-        self.t_norm_1 = nn.BatchNorm3d(out_channels, momentum=0.01, eps=0.001)
+        self.t_norm_1 = nn.BatchNorm3d(out_channels, momentum=0.1, eps=0.001)
         self.t_2 = nn.Conv3d(out_channels, out_channels, kernel_size=(kernel_2, 1, 1), 
                            padding=(self.padding_2, 0, 0), bias=False)
-        self.t_norm_2 = nn.BatchNorm3d(out_channels, momentum=0.01, eps=0.001)
+        self.t_norm_2 = nn.BatchNorm3d(out_channels, momentum=0.1, eps=0.001)
 
     def forward(self, x):
         x = self.relu(self.s_norm_1(self.s_1(x)))
